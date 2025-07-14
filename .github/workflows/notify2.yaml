@@ -2,7 +2,8 @@ name: Check Indicators and Notify
 
 on:
   schedule:
-    - cron: "0 0 * * *"      # täglicher Lauf 00:00 UTC
+    # täglicher Lauf um 00:00 UTC
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 permissions:
@@ -27,7 +28,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install yahooquery yfinance pandas
           sudo apt-get update -y
-          sudo apt-get install -y jq        # jq fürs JSON-Escaping
+          sudo apt-get install -y jq      # jq zum JSON-Escapen
 
       # -------------------------------------------------------------------
       - name: Run bot script
@@ -37,22 +38,21 @@ jobs:
       - name: Read content from file
         id: read_file
         run: |
-          if [[ -f message.txt ]]; then
-            CONTENT=$(cat message.txt)
-            # Als gültigen JSON-String escapen und im ENV ablegen
-            echo "CONTENT_ESCAPED=$(printf '%s' "$CONTENT" | jq -Rs .)" >> $GITHUB_ENV
+          if [[ -s message.txt ]]; then               # Datei existiert & > 0 Byte
+            CONTENT=$(jq -Rs . < message.txt)         # JSON-safe escapen
+            echo "CONTENT=$CONTENT" >> $GITHUB_ENV
           else
-            echo "CONTENT_ESCAPED=" >> $GITHUB_ENV
+            echo "CONTENT=" >> $GITHUB_ENV            # leer lassen
           fi
 
       - name: Send notification to Discord
-        if: env.CONTENT_ESCAPED != ''
+        if: env.CONTENT != ''                         # nur wenn Inhalt vorhanden
         env:
-          CONTENT_ESCAPED: ${{ env.CONTENT_ESCAPED }}
+          CONTENT: ${{ env.CONTENT }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           curl -X POST -H "Content-Type: application/json" \
-               -d "{\"content\": ${CONTENT_ESCAPED} }" \
+               -d "{\"content\": ${CONTENT} }" \
                "$DISCORD_WEBHOOK_URL"
 
       # -------------------------------------------------------------------
@@ -61,7 +61,7 @@ jobs:
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Nur History-Dateien versionieren
+          # nur Verlaufsdateien versionieren – message.txt bleibt lokal
           for f in gaa_history.csv history*.txt; do
             [ -e "$f" ] && git add "$f"
           done
