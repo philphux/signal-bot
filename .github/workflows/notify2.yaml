@@ -13,6 +13,7 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
+      # --------------------------------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v3
 
@@ -26,15 +27,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install yahooquery pandas yfinance
 
+      # --------------------------------------------------------------------
       - name: run script
         run: |
           python3 main.py
 
+      # --------------------------------------------------------------------
       - name: Read content from file
         id: read_file
         run: |
           if [[ -f message.txt ]]; then
-            CONTENT=$(cat message.txt | sed ':a;N;$!ba;s/\n/\\n/g')
+            CONTENT=$(sed ':a;N;$!ba;s/\n/\\n/g' message.txt)
             echo "CONTENT=$CONTENT" >> $GITHUB_ENV
           else
             echo "File message.txt not found. No changes to commit."
@@ -47,13 +50,19 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           curl -X POST -H "Content-Type: application/json" \
-          -d "{\"content\": \"${CONTENT}\"}" \
-          $DISCORD_WEBHOOK_URL
-      
+               -d "{\"content\": \"${CONTENT}\"}" \
+               "$DISCORD_WEBHOOK_URL"
+
+      # --------------------------------------------------------------------
       - name: Push changes
         run: |
-          git config --global user.name "github-actions[bot]"
+          git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add history*.txt
-          git commit -m "Update current indicator data [ci skip]" || exit 0
-          git push origin main || git push origin main --set-upstream
+
+          # Nur vorhandene Dateien hinzufügen – verhindert 'pathspec'-Fehler
+          for f in message.txt gaa_history.csv history*.txt; do
+            [ -e "$f" ] && git add "$f"
+          done
+
+          git commit -m "Update history" || echo "Nothing to commit"
+          git push origin main || echo "Nothing to push"
