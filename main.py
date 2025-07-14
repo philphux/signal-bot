@@ -1,29 +1,54 @@
 import traceback
-
 from strategies.spytips_cool import spy_tips_cool
+from strategies.gaa_momentum import gaa_monthly_momentum
 
-def saveText(subject, subject2=None, text=None):
-    if not subject and not subject2:
+# ---------------------------------------------------------------
+# Hilfsfunktion: schreibt (subject, subject2, text) in message.txt
+# ---------------------------------------------------------------
+def save_text(subject, subject2=None, text=None):
+    if not (subject or subject2):
         return
-    d = open('message.txt', 'w')
-    if subject:
-        d.write(subject + "\n\n")
-    if subject2:
-        d.write(subject2 + "\n\n")
-    if text:
-        d.write(text)
-    d.close()
+    with open("message.txt", "a", encoding="utf-8") as f:  # ➊  APPEND
+        if subject:
+            f.write(subject + "\n\n")
+        if subject2:
+            f.write(subject2 + "\n\n")
+        if text:
+            f.write(text + "\n\n")
 
+# ---------------------------------------------------------------
+# Liste aller Strategien
+# ---------------------------------------------------------------
+STRATEGIES = [
+    spy_tips_cool,
+    gaa_monthly_momentum,
+]
+
+# ---------------------------------------------------------------
+# Hauptprogramm
+# ---------------------------------------------------------------
 def main():
-    s, s2, t = spy_tips_cool()
-    if s is None and s2 is None and t is None:
-        print("Skipped")
-    else:
-        saveText(s, s2, t)
+    # ➋  message.txt zu Beginn leeren
+    open("message.txt", "w").close()
 
+    anything_written = False
+
+    for strat in STRATEGIES:
+        try:
+            s, s2, t = strat()                # jeweils (subject, subject2, text)
+            if any(x is not None for x in (s, s2, t)):
+                save_text(s, s2, t)
+                anything_written = True
+            else:
+                print(f"{strat.__name__}: Skipped")
+        except Exception as e:
+            err_msg = "".join(traceback.format_exception(e))
+            save_text(f"Error in {strat.__name__}", None, err_msg)
+            anything_written = True
+
+    if not anything_written:
+        print("Keine Strategie hat heute etwas zu melden.")
+
+# ---------------------------------------------------------------
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        error = repr(traceback.format_exception(e))
-        saveText("Error", error)
+    main()
