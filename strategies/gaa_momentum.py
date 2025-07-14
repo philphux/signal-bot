@@ -1,102 +1,101 @@
 """
-GAA-Momentum nach Meb Faber – korrigierte Fassung
+Global Asset Allocation – Momentum (kompakt)
+
+Universum : NQ=F, BTC=F, GC=F, CL=F, EEM, FEZ, IEF
+Momentum  : Rendite 1 M + 3 M + 6 M + 9 M
+Filter    : Kurs > SMA150
+Rebalance : nur am Monatsende; es werden die 3 Top-Assets gehalten
 """
 
 from __future__ import annotations
 import os, warnings
 from typing import Dict, List, Tuple
-import pandas as pd, yahooquery as yq, yfinance as yf
 
-ETF  = ["EEM", "FEZ", "IEF"]
-FUT: Dict[str, str] = {      # interne Bezeichnung : yfinance-Symbol
+import pandas as pd
+import yahooquery as yq
+import yfinance as yf
+
+ETF       = ["EEM", "FEZ", "IEF"]
+FUT: Dict[str, str] = {          # interner Name → yfinance-Symbol
     "NQ=F":  "NQ=F",
     "BTC=F": "BTC-USD",
     "GC=F":  "GC=F",
     "CL=F":  "CL=F",
 }
-
-TOP_N, SMA_N = 3, 150
+TOP_N        = 3
+SMA_LEN      = 150
 HIST_FILE    = "gaa_history.csv"
 
-# ---------------------------------------------------------------------------
-def _utc_naive(idx): return pd.to_datetime(idx, utc=True).tz_convert(None)
+# ---------------------------------------------------------------------------#
+def _utc_naive(idx):
+    return pd.to_datetime(idx, utc=True).tz_convert(None)
 
-def _etf() -> pd.DataFrame:
+def _fetch_etf() -> pd.DataFrame:
     df = yq.Ticker(" ".join(ETF)).history(period="2y", interval="1d")["close"].unstack()
     df.index = _utc_naive(df.index)
     return df
 
-def _fut() -> Tuple[pd.DataFrame, List[str]]:
-    frames, bad = [], []
+def _fetch_fut() -> pd.DataFrame:
+    frames = []
     for name, sym in FUT.items():
         try:
-            s = yf.download(sym, period="2y", interval="1d", progress=False)["Close"]
-            if s.empty: raise ValueError("leere Serie")
+            s = yf.download(sym, period="2y", interval="1d", progress=False")["Close"]
+            if s.empty:
+                raise ValueError("leerer Datensatz")
             frames.append(s.rename(name).tz_localize(None))
         except Exception as e:
-            warnings.warn(f"{name}: {e}"), bad.append(name)
-    return (pd.concat(frames, axis=1) if frames else pd.DataFrame(), bad)
+            warnings.warn(f"{name}: {e}")
+    return pd.concat(frames, axis=1)
 
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------#
 def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
-    today   = pd.Timestamp.utcnow().normalize()
-    etf, fut, bad = _etf(), *_fut()
+    today = pd.Timestamp.utcnow().normalize()
 
-    hist = pd.concat([etf, fut], axis=1).sort_index()
-    last = hist.dropna().index[-1]  # letzter Tag mit vollständigen Daten
-    hist = hist.loc[:last]
+    hist = pd.concat([_fetch_etf(), _fetch_fut()], axis=1).sort_index()
+    hist = hist.loc[:hist.dropna().index[-1]]        # letzter kompletter Tag
 
-    # Monatsende bestimmen
-    m_ends = hist.index.to_period("M").unique().to_timestamp("M")
-    m_end  = m_ends[-1] if (today.month != m_ends[-1].month) else m_ends[-2]
-
-    # bereits verbucht?
-    if os.path.exists(HIST_FILE):
-        last_line = open(HIST_FILE).read().strip().split(";")
-        if last_line and pd.to_datetime(last_line[0]) == m_end:
+    # Letzte abgeschlossene Monatskerze
+    month_ends = hist.index.to_period("M").unique().to_timestamp("M")
+    month_end  = month_ends[-1]
+    if (today.month, today.year) == (month_end.month, month_end.year):
+        if len(month_ends) < 2:
             return None, None, None
-        prev = last_line[1].split(",") if len(last_line) > 1 else []
+        month_end = month_ends[-2]
+
+    # Bereits verbucht?
+    if os.path.exists(HIST_FILE):
+        last_d, *_ = open(HIST_FILE).read().strip().partition(";")
+        if last_d == f"{month_end:%F}":
+            return None, None, None
+        prev_pos = _.strip().split(",") if _ else []
     else:
-        prev = []
+        prev_pos = []
 
     # Momentum-Score
     mon = hist.resample("M").last()
-    r1, r3, r6, r9 = (mon.pct_change(n).iloc[-1] for n in (1,3,6,9))
-    score = (r1 + r3 + r6 + r9).dropna()
+    score = (mon.pct_change(1).iloc[-1] +
+             mon.pct_change(3).iloc[-1] +
+             mon.pct_change(6).iloc[-1] +
+             mon.pct_change(9).iloc[-1]).dropna()
 
+    # SMA-Filter
+    last = hist.index[-1]
+    sma  = hist.rolling(SMA_LEN).mean().loc[last]
     price = hist.loc[last]
-    sma   = hist.rolling(SMA_N).mean().loc[last]
-    elig  = score.index[price[score.index] > sma[score.index]]
-    score = score.loc[elig]
+    elig   = score.index[price[score.index] > sma[score.index]]
+    top    = score.loc[elig].sort_values(ascending=False).head(TOP_N)
+    hold   = list(top.index)
 
-    if score.empty:
-        msg = "→ Cash (kein Asset > SMA150)"
-        if bad: msg += f"\nIgnoriert: {', '.join(bad)}"
-        return "GAA – kein Kauf", "", msg
-
-    top   = score.sort_values(ascending=False).head(TOP_N)
-    hold  = list(top.index)
-
-    # Verlauf speichern
+    # Verlauf sichern
     with open(HIST_FILE, "a") as f:
-        f.write(f"{m_end:%F};{','.join(hold)}\n")
+        f.write(f"{month_end:%F};{','.join(hold)}\n")
 
-    # Meldung
-    subj = f"GAA Rebalance ({m_end:%b %Y})" if set(hold)!=set(prev)\
-           else f"GAA – keine Änderung ({m_end:%b %Y})"
+    # Meldung aufbauen
+    subj = f"GAA Rebalance ({month_end:%b %Y})"
+    body = [f"Neu kaufen: {', '.join(sorted(set(hold)-set(prev_pos)))}",
+            f"Aktuelles Portfolio: {', '.join(hold)}",
+            "",
+            "Momentum-Scores:"]
+    body += [f"{t}: {sc:+.2%}" for t, sc in top.items()]
 
-    lines = []
-    if add:=set(hold)-set(prev):  lines.append("Neu kaufen: "+", ".join(add))
-    if sell:=set(prev)-set(hold): lines.append("Verkaufen: "+", ".join(sell))
-    lines.append("Aktuelles Portfolio: "+(", ".join(hold) or "Cash"))
-
-    # Debug-Tabelle
-    lines.append("\nDetails (Schlusskurs "+last.strftime('%Y-%m-%d')+"):")
-    for t in hist.columns:
-        tag = "✔" if t in hold else " "
-        lines.append(f"{t:<6}  P {price[t]:>8.2f}  SMA {sma[t]:>8.2f}  "
-                     f"Δ {price[t]-sma[t]:>7.2f}  Mom {score.get(t,pd.NA):>7}")
-
-    if bad: lines.append("\nIgnoriert (keine Daten): "+", ".join(bad))
-
-    return subj, "", "\n".join(lines)
+    return subj, "", "\n".join(body)
