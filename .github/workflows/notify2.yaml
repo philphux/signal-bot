@@ -1,8 +1,8 @@
-name: Check Indicators for SPYTIPS COOL STRATEGY
+name: Check Indicators and Notify
 
 on:
   schedule:
-    # SELECT DAILY RUN TIME (UTC)
+    # täglicher Lauf 00:00 UTC
     - cron: "0 0 * * *"
   workflow_dispatch:
 
@@ -12,8 +12,9 @@ permissions:
 jobs:
   notify:
     runs-on: ubuntu-latest
+
     steps:
-      # --------------------------------------------------------------------
+      # -------------------------------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v3
 
@@ -27,12 +28,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install yahooquery pandas yfinance
 
-      # --------------------------------------------------------------------
-      - name: run script
-        run: |
-          python3 main.py
+      # -------------------------------------------------------------------
+      - name: Run bot script
+        run: python3 main.py
 
-      # --------------------------------------------------------------------
+      # -------------------------------------------------------------------
       - name: Read content from file
         id: read_file
         run: |
@@ -40,11 +40,12 @@ jobs:
             CONTENT=$(sed ':a;N;$!ba;s/\n/\\n/g' message.txt)
             echo "CONTENT=$CONTENT" >> $GITHUB_ENV
           else
-            echo "File message.txt not found. No changes to commit."
-            exit 0
+            echo "message.txt not found – nothing to send."
+            echo "CONTENT=" >> $GITHUB_ENV
           fi
 
       - name: Send notification to Discord
+        if: env.CONTENT != ''
         env:
           CONTENT: ${{ env.CONTENT }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -53,14 +54,14 @@ jobs:
                -d "{\"content\": \"${CONTENT}\"}" \
                "$DISCORD_WEBHOOK_URL"
 
-      # --------------------------------------------------------------------
-      - name: Push changes
+      # -------------------------------------------------------------------
+      - name: Push history changes
         run: |
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Nur vorhandene Dateien hinzufügen – verhindert 'pathspec'-Fehler
-          for f in message.txt gaa_history.csv history*.txt; do
+          # nur echte Verlaufsdateien versionieren – message.txt bleibt lokal
+          for f in gaa_history.csv history*.txt; do
             [ -e "$f" ] && git add "$f"
           done
 
