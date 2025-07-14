@@ -1,13 +1,17 @@
 """
 Global-Asset-Allocation-Strategie (Momentum) nach Meb Faber
 
-• Momentum-Score = Rendite 1 M + 3 M + 6 M + 9 M
-• Investition nur, wenn Kurs > SMA150
-• Rebalance am Ende jedes Kalendermonats – TOP_N beste Werte
+• Universe : NQ=F, BTC=F, GC=F, CL=F, EEM, FEZ, IEF
+• Momentum : Rendite 1 M + 3 M + 6 M + 9 M
+• Filter   : Investition nur, wenn Schlusskurs > SMA150
+• Rebalance: nach jedem Monatsende (TOP_N beste Werte werden gehalten)
 """
 
 from __future__ import annotations
-import os, time, warnings
+
+import os
+import time
+import warnings
 from typing import List, Tuple
 
 import pandas as pd
@@ -18,33 +22,43 @@ import yfinance as yf
 # Parameter                                                                   #
 # ---------------------------------------------------------------------------#
 ETF_TICKERS     = ["EEM", "FEZ", "IEF"]
-FUTURE_TICKERS  = {"NQ=F": "NQ=F", "BTC=F": "BTC-USD", "GC=F": "GC=F", "CL=F": "CL=F"}
+FUTURE_TICKERS  = {
+    "NQ=F": "NQ=F",
+    "BTC=F": "BTC-USD",
+    "GC=F": "GC=F",
+    "CL=F": "CL=F",
+}
 TOP_N           = 3
 SMA_WINDOW      = 150
 HISTORY_FILE    = "gaa_history.csv"
 RETRY           = 3
 
 # ---------------------------------------------------------------------------#
+def _naive_utc_index(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Index → UTC → tz-naiv."""
+    idx = pd.to_datetime(idx, utc=True)
+    return idx.tz_convert(None)
+
+# ---------------------------------------------------------------------------#
 def fetch_etfs() -> pd.DataFrame:
-    tq = yq.Ticker(" ".join(ETF_TICKERS))
-    df = tq.history(period="2y", interval="1d")["close"].unstack(level=0)
-    df.index = pd.to_datetime(df.index)
+    tq  = yq.Ticker(" ".join(ETF_TICKERS))
+    df  = tq.history(period="2y", interval="1d")["close"].unstack(level=0)
+    df.index = _naive_utc_index(df.index)
     return df
 
 def fetch_futures() -> pd.DataFrame:
     frames = []
     for ym, yf_sym in FUTURE_TICKERS.items():
         try:
-            data = yf.download(yf_sym, period="2y", interval="1d", progress=False)["Close"]
+            data = yf.download(
+                yf_sym, period="2y", interval="1d", progress=False
+            )["Close"]
             data.name = ym
+            data.index = _naive_utc_index(data.index)
             frames.append(data)
         except Exception as e:
             warnings.warn(f"{ym}: {e}")
-    if frames:
-        fut = pd.concat(frames, axis=1)
-        fut.index = pd.to_datetime(fut.index)
-        return fut
-    return pd.DataFrame()
+    return pd.concat(frames, axis=1) if frames else pd.DataFrame()
 
 # ---------------------------------------------------------------------------#
 def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
@@ -56,7 +70,7 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     fut_df = fetch_futures()
     hist   = pd.concat([etf_df, fut_df], axis=1).sort_index().dropna(how="all")
 
-    if hist.empty or hist.shape[1] == 0:
+    if hist.empty:
         return "GAA-Fehler", None, "Kein einziger Ticker liefert Kursdaten."
 
     # 2) Letzte vollendete Monatskerze --------------------------------------
@@ -79,16 +93,16 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     # 3) Momentum-Score -----------------------------------------------------
     monthly = hist.resample("M").last()
     r1, r3, r6, r9 = (monthly.pct_change(n).iloc[-1] for n in (1, 3, 6, 9))
-    score = (r1 + r3 + r6 + r9).dropna()
+    score   = (r1 + r3 + r6 + r9).dropna()
 
-    sma150 = hist.rolling(SMA_WINDOW).mean().loc[month_end]
-    elig   = score.index[hist.loc[month_end, score.index] > sma150[score.index]]
-    score  = score.loc[elig]
+    sma150  = hist.rolling(SMA_WINDOW).mean().loc[month_end]
+    elig    = score.index[hist.loc[month_end, score.index] > sma150[score.index]]
+    score   = score.loc[elig]
 
     if score.empty:
         return "GAA – kein Asset über SMA150", "", "→ Cash"
 
-    top = score.sort_values(ascending=False).head(TOP_N)
+    top           = score.sort_values(ascending=False).head(TOP_N)
     new_positions = list(top.index)
 
     # 4) Verlauf sichern ----------------------------------------------------
@@ -107,10 +121,10 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     if (sold := set(last_positions) - set(new_positions)):
         lines.append("Verkaufen: " + ", ".join(sorted(sold)))
     lines.append("Aktuelles Portfolio: " +
-                 (', '.join(new_positions) if new_positions else "Cash"))
+                 (", ".join(new_positions) if new_positions else "Cash"))
     lines.append("")
     lines.append("Momentum-Scores:")
-    for t, s in top.items():
-        lines.append(f"{t}: {s:+.2%}")
+    for ticker, sc in top.items():
+        lines.append(f"{ticker}: {sc:+.2%}")
 
     return f"GAA Rebalance ({month_end:%b %Y})", "", "\n".join(lines)
