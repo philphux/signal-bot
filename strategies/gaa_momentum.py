@@ -1,17 +1,15 @@
 """
 Global-Asset-Allocation-Strategie (Momentum) nach Meb Faber
 
-• Universe : NQ=F, BTC=F, GC=F, CL=F, EEM, FEZ, IEF
-• Momentum : Rendite 1 M + 3 M + 6 M + 9 M
-• Filter   : Kurs > SMA150
-• Rebalance: nach jedem Monatsende, TOP_N beste Assets
+• Universum : NQ=F, BTC=F, GC=F, CL=F, EEM, FEZ, IEF
+• Momentum  : Rendite 1 M + 3 M + 6 M + 9 M
+• Filter    : Kurs > SMA150 (berechnet auf dem letzten Tag mit *vollständigen*
+               Preisen für alle Assets)
+• Rebalance : Einmal pro Kalendermonat (TOP_N beste Assets)
 """
 
 from __future__ import annotations
-
-import os
-import time
-import warnings
+import os, time, warnings
 from typing import Dict, List, Tuple
 
 import pandas as pd
@@ -19,90 +17,90 @@ import yahooquery as yq
 import yfinance as yf
 
 # ---------------------------------------------------------------------------#
-# Parameter                                                                   #
-# ---------------------------------------------------------------------------#
 ETF_TICKERS      = ["EEM", "FEZ", "IEF"]
-# key = interner Name (soll im Universe erscheinen)
-# val = Download-Symbol bei yfinance
-FUTURE_TICKERS: Dict[str, str] = {
+FUTURE_TICKERS: Dict[str, str] = {          # <interner Name>: <yfinance-Symbol>
     "NQ=F":  "NQ=F",
-    "BTC=F": "BTC-USD",   # Spot-Preis als Ersatz
+    "BTC=F": "BTC-USD",   # Spot als Ersatz
     "GC=F":  "GC=F",
     "CL=F":  "CL=F",
 }
-
-TOP_N           = 3
-SMA_WINDOW      = 150
-HISTORY_FILE    = "gaa_history.csv"
-RETRY           = 3
-
+TOP_N        = 3
+SMA_WINDOW   = 150
+HISTORY_FILE = "gaa_history.csv"
+RETRY        = 3
 # ---------------------------------------------------------------------------#
 def _naive_utc(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    """tz-aware → UTC → tz-naiv (verhindert Mischfehler)."""
+    """tz-aware → UTC → tz-naiv (verhindert Mix-Fehler)."""
     return pd.to_datetime(idx, utc=True).tz_convert(None)
 
-# ---------------------------------------------------------------------------#
+# ETFs ----------------------------------------------------------------------
 def fetch_etfs() -> pd.DataFrame:
-    tq  = yq.Ticker(" ".join(ETF_TICKERS))
-    df  = tq.history(period="2y", interval="1d")["close"].unstack(level=0)
+    tq = yq.Ticker(" ".join(ETF_TICKERS))
+    df = tq.history(period="2y", interval="1d")["close"].unstack(level=0)
     df.index = _naive_utc(df.index)
     return df
 
-def fetch_futures() -> pd.DataFrame:
-    frames = []
-    ignored = []
-    for col, yf_sym in FUTURE_TICKERS.items():
+# Futures / Bitcoin ---------------------------------------------------------
+def fetch_futures() -> Tuple[pd.DataFrame, List[str]]:
+    frames, ignored = [], []
+    for name, sym in FUTURE_TICKERS.items():
         try:
-            data = yf.download(
-                yf_sym, period="2y", interval="1d", progress=False
-            )["Close"]
-            if data.empty:
-                raise ValueError("keine Daten")
-            data.index = _naive_utc(data.index)
-            data.name  = col                   # interner Name beibehalten!
-            frames.append(data)
+            ser = yf.download(sym, period="2y", interval="1d",
+                              progress=False)["Close"]
+            if ser.empty:
+                raise ValueError("leerer Datensatz")
+            ser.index = _naive_utc(ser.index)
+            ser.name  = name          # Spaltenname = internes Kürzel
+            frames.append(ser)
         except Exception as e:
-            warnings.warn(f"{col}: {e}")
-            ignored.append(col)
-    return pd.concat(frames, axis=1), ignored
-
+            warnings.warn(f"{name}: {e}")
+            ignored.append(name)
+    fut = pd.concat(frames, axis=1) if frames else pd.DataFrame()
+    return fut, ignored
 # ---------------------------------------------------------------------------#
 def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
-    """Liefert max. eine Rebalance-Meldung pro Monat."""
     today = pd.Timestamp.utcnow().normalize()
 
-    # 1) Kursdaten ----------------------------------------------------------
+    # 1) Daten holen --------------------------------------------------------
     etf_df        = fetch_etfs()
     fut_df, skip  = fetch_futures()
-    hist          = pd.concat([etf_df, fut_df], axis=1).sort_index().dropna(how="all")
+    hist          = pd.concat([etf_df, fut_df], axis=1).sort_index()
 
-    if hist.empty:
-        return "GAA-Fehler", None, "Universum liefert keine Kursdaten."
+    # letzter Tag mit *vollständigen* Daten
+    hist_full = hist.dropna()
+    if hist_full.empty:
+        return "GAA-Fehler", None, "Kein Handelstag mit vollständigen Kursen."
 
-    # 2) Letzte vollendete Monatskerze --------------------------------------
+    last_date = hist_full.index[-1]           # z. B. letzter Freitag
+    hist      = hist.loc[:last_date]          # auf diesen Tag beschneiden
+
+    # 2) Letzte abgeschlossene Monatskerze ----------------------------------
     month_ends = hist.index.to_period("M").unique().to_timestamp("M")
     month_end  = month_ends[-1]
     if (today.year, today.month) == (month_end.year, month_end.month):
+        # aktueller Monat läuft noch – nimm den vorherigen
         if len(month_ends) < 2:
             return None, None, None
         month_end = month_ends[-2]
 
-    # 3) Doppel-Check Historie ---------------------------------------------
-    last_positions: List[str] = []
+    # 3) Doppel-Verbuchen verhindern ---------------------------------------
+    last_pos: List[str] = []
     if os.path.exists(HISTORY_FILE):
-        last_line = open(HISTORY_FILE).read().strip().split(";")
-        if last_line and pd.to_datetime(last_line[0]) == month_end:
+        last = open(HISTORY_FILE).read().strip().split(";")
+        if last and pd.to_datetime(last[0]) == month_end:
             return None, None, None
-        if len(last_line) > 1:
-            last_positions = [t for t in last_line[1].split(",") if t]
+        if len(last) > 1:
+            last_pos = [t for t in last[1].split(",") if t]
 
-    # 4) Momentum-Score & Filter -------------------------------------------
+    # 4) Momentum-Score -----------------------------------------------------
     monthly  = hist.resample("M").last()
     r1, r3, r6, r9 = (monthly.pct_change(n).iloc[-1] for n in (1, 3, 6, 9))
     score    = (r1 + r3 + r6 + r9).dropna()
 
-    sma150   = hist.rolling(SMA_WINDOW).mean().loc[month_end]
-    elig     = score.index[hist.loc[month_end, score.index] > sma150[score.index]]
+    # 5) SMA150-Filter auf dem letzten vollständigen Tag --------------------
+    sma150   = hist.rolling(SMA_WINDOW).mean().loc[last_date]
+    price    = hist.loc[last_date]
+    elig     = score.index[price[score.index] > sma150[score.index]]
     score    = score.loc[elig]
 
     if score.empty:
@@ -111,34 +109,33 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
             txt += f"\nIgnoriert (keine Daten): {', '.join(skip)}"
         return "GAA – kein Kauf", "", txt
 
-    top            = score.sort_values(ascending=False).head(TOP_N)
-    new_positions  = list(top.index)
+    top           = score.sort_values(ascending=False).head(TOP_N)
+    new_positions = list(top.index)
 
-    # 5) History sichern ----------------------------------------------------
+    # 6) Verlauf sichern ----------------------------------------------------
     with open(HISTORY_FILE, "a") as f:
         f.write(f"{month_end:%Y-%m-%d};{','.join(new_positions)}\n")
 
-    # 6) Meldung ------------------------------------------------------------
-    if set(new_positions) == set(last_positions):
-        subject = f"GAA – keine Änderung ({month_end:%b %Y})"
-        text    = f"Portfolio unverändert: {', '.join(new_positions)}"
+    # 7) Meldung ------------------------------------------------------------
+    if set(new_positions) == set(last_pos):
+        header = f"GAA – keine Änderung ({month_end:%b %Y})"
+        lines  = [f"Portfolio unverändert: {', '.join(new_positions)}"]
     else:
-        subject = f"GAA Rebalance ({month_end:%b %Y})"
-        lines: List[str] = []
-        if (added := set(new_positions) - set(last_positions)):
-            lines.append("Neu kaufen: " + ", ".join(sorted(added)))
-        if (sold := set(last_positions) - set(new_positions)):
-            lines.append("Verkaufen: " + ", ".join(sorted(sold)))
+        header = f"GAA Rebalance ({month_end:%b %Y})"
+        lines  = []
+        if (add := set(new_positions) - set(last_pos)):
+            lines.append("Neu kaufen: " + ", ".join(sorted(add)))
+        if (sell := set(last_pos) - set(new_positions)):
+            lines.append("Verkaufen: " + ", ".join(sorted(sell)))
         lines.append("Aktuelles Portfolio: " +
                      (", ".join(new_positions) if new_positions else "Cash"))
-        text = "\n".join(lines)
 
-    # Momentum-Details anhängen
-    text += "\n\nMomentum-Scores:"
+    # Momentum-Details
+    lines.append("\nMomentum-Scores:")
     for t, sc in top.items():
-        text += f"\n{t}: {sc:+.2%}"
+        lines.append(f"{t}: {sc:+.2%}")
 
     if skip:
-        text += f"\n\nIgnoriert (keine Daten): {', '.join(skip)}"
+        lines.append("\nIgnoriert (keine Daten): " + ", ".join(skip))
 
-    return subject, "", text
+    return header, "", "\n".join(lines)
