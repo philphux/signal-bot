@@ -1,53 +1,52 @@
+"""
+main.py – zentraler Einstieg für alle Strategien
+
+- leert bei jedem Lauf die Datei message.txt
+- ruft nacheinander alle Strategien in STRATEGIES auf
+- jede Strategie liefert (subject, subject2, text) oder (None, None, None)
+- nicht-leere Ergebnisse werden an message.txt angehängt
+"""
+
+from __future__ import annotations
 import os
 import traceback
 
-from strategies.spytips_cool import spy_tips_cool
+# ---- Strategien -----------------------------------------------------------
 from strategies.gaa_momentum import gaa_monthly_momentum
+from strategies.spytips_cool import spy_tips_cool
 
-# ---------------------------------------------------------------------------
-# Alle Strategien, die täglich laufen sollen
-# ---------------------------------------------------------------------------
 STRATEGIES = [
-    spy_tips_cool,
-    gaa_monthly_momentum,
+    gaa_monthly_momentum,   # GAA-Momentum (monatlich)
+    spy_tips_cool,          # bestehende SPY/TIPS-Strategie
 ]
 
-# ---------------------------------------------------------------------------
-def save_text(subject: str | None,
-              subject2: str | None = None,
-              text: str | None = None) -> None:
-    """Hängt eine Meldung an message.txt an."""
+# ---- Helper ---------------------------------------------------------------
+def save(subject: str | None,
+         subject2: str | None = None,
+         text: str | None = None) -> None:
+    """Hängt die Inhalte in message.txt an (wenn mindestens ein Teil vorhanden)."""
     if not (subject or subject2):
         return
     with open("message.txt", "a", encoding="utf-8") as f:
-        if subject:
-            f.write(subject + "\n\n")
-        if subject2:
-            f.write(subject2 + "\n\n")
-        if text:
-            f.write(text + "\n\n")
+        for part in (subject, subject2, text):
+            if part:
+                f.write(part + "\n\n")
 
-# ---------------------------------------------------------------------------
+# ---- Hauptprogramm --------------------------------------------------------
 def main() -> None:
-    # frische Datei für jeden Lauf
+    # Datei zum Start leeren
     open("message.txt", "w").close()
 
     for strat in STRATEGIES:
         try:
-            s, s2, t = strat()
-            if any(x is not None for x in (s, s2, t)):
-                save_text(s, s2, t)
+            subj, subj2, body = strat()
+            if any(x is not None for x in (subj, subj2, body)):
+                save(subj, subj2, body)
             else:
                 print(f"{strat.__name__}: skipped")
         except Exception as exc:
-            save_text(f"Error in {strat.__name__}", None,
-                      "".join(traceback.format_exception(exc)))
+            err = "".join(traceback.format_exception(exc))
+            save(f"Error in {strat.__name__}", None, err)
 
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
-
-    # Heartbeat: auch bei Null-Nachrichten immer eine Datei erzeugen
-    if os.path.getsize("message.txt") == 0:
-        with open("message.txt", "w", encoding="utf-8") as f:
-            f.write("ℹ️  Keine neuen Signale heute.")
