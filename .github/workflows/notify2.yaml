@@ -2,7 +2,7 @@ name: Check Indicators and Notify
 
 on:
   schedule:
-    - cron: "0 0 * * *"   # täglicher Lauf 00 UTC
+    - cron: "0 0 * * *"      # täglicher Lauf 00:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # -------------------------------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v3
 
@@ -25,36 +26,45 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install yahooquery yfinance pandas
+          sudo apt-get update -y
+          sudo apt-get install -y jq        # jq fürs JSON-Escaping
 
+      # -------------------------------------------------------------------
       - name: Run bot script
         run: python3 main.py
 
+      # -------------------------------------------------------------------
       - name: Read content from file
         id: read_file
         run: |
           if [[ -f message.txt ]]; then
-            CONTENT=$(sed ':a;N;$!ba;s/\n/\\n/g' message.txt)
-            echo "CONTENT=$CONTENT" >> $GITHUB_ENV
+            CONTENT=$(cat message.txt)
+            # Als gültigen JSON-String escapen und im ENV ablegen
+            echo "CONTENT_ESCAPED=$(printf '%s' "$CONTENT" | jq -Rs .)" >> $GITHUB_ENV
           else
-            echo "CONTENT=" >> $GITHUB_ENV
+            echo "CONTENT_ESCAPED=" >> $GITHUB_ENV
           fi
 
       - name: Send notification to Discord
-        if: env.CONTENT != ''
+        if: env.CONTENT_ESCAPED != ''
         env:
-          CONTENT: ${{ env.CONTENT }}
+          CONTENT_ESCAPED: ${{ env.CONTENT_ESCAPED }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           curl -X POST -H "Content-Type: application/json" \
-               -d "{\"content\": \"${CONTENT}\"}" \
+               -d "{\"content\": ${CONTENT_ESCAPED} }" \
                "$DISCORD_WEBHOOK_URL"
 
+      # -------------------------------------------------------------------
       - name: Push history changes
         run: |
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Nur History-Dateien versionieren
           for f in gaa_history.csv history*.txt; do
             [ -e "$f" ] && git add "$f"
           done
+
           git commit -m "Update history" || echo "Nothing to commit"
           git push origin main || echo "Nothing to push"
