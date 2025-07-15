@@ -1,9 +1,9 @@
 """
-Global Asset Allocation – Momentum (kompakt, robust)
+Global Asset Allocation – Momentum (kompakt, robust, Debug)
 
 Universum : NQ=F, BTC=F, GC=F, CL=F, EEM, FEZ, IEF
 Momentum  : Rendite 1 M + 3 M + 6 M + 9 M
-Filter    : Kurs > SMA150  (je Ticker letzter Schlusskurs)
+Filter    : Kurs > SMA150 (je Ticker letzter Schlusskurs)
 Rebalance : Monatsende; Top‑3 gleichgewichtet
 """
 
@@ -34,14 +34,19 @@ def _utc(idx):
     return pd.to_datetime(idx, utc=True).tz_convert(None)
 
 def _fetch_all() -> pd.DataFrame:
-    """holt alle Ticker in einem Call, formatiert Date×Ticker‑Matrix"""
+    """
+    holt alle Ticker in einem Call,
+    liefert Date × Ticker‑Matrix (Close‑Preise)
+    """
     h = yq.Ticker(" ".join(TICKERS)).history(period="2y", interval="1d")["close"]
 
     # MultiIndex (symbol, date) → Pivot
     if isinstance(h.index, pd.MultiIndex):
-        h = (h.reset_index()
-               .pivot(index="date", columns="symbol", values="close"))
-    else:  # fallback: schon richtig
+        h = (
+            h.reset_index()                       # columns: symbol, date, close
+              .pivot(index="date", columns="symbol", values="close")
+        )
+    else:  # fallback
         h = h.to_frame().rename(columns={"close": h.name})
 
     h = h.rename(columns=REN_MAP)          # Futures auf internes Kürzel
@@ -58,12 +63,12 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     print("DEBUG hist shape:", hist.shape,
           "vollständige Tage:", hist.dropna().shape[0])
 
-    # Daten bis zum letzten Tag mit *irgendeinem* Kurs
+    # Daten bis zum letzten Tag mit irgendeinem Kurs
     today = pd.Timestamp.utcnow().normalize()
     last  = hist.dropna(how="all").index[-1]
     hist  = hist.loc[:last]
 
-    # finales Monatsende wählen
+    # finales Monatsende
     m_ends = hist.index.to_period("M").unique().to_timestamp("M")
     m_end  = m_ends[-2] if (today.month, today.year) == (m_ends[-1].month,
                                                          m_ends[-1].year) else m_ends[-1]
@@ -85,15 +90,24 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
         mon.pct_change(9).iloc[-1]
     ).dropna()
 
-    # ---- pro‑Ticker letzter Kurs & SMA150 ----------------------------------
+    # letzter Kurs & SMA150 je Ticker
     latest = hist.ffill().iloc[-1]
     sma    = hist.rolling(SMA_LEN).mean().ffill().iloc[-1]
-
     eligible = mom.index[(latest > sma) & sma.notna()]
-    print("DEBUG eligible tickers:", list(eligible))
+
+    # ----- Debug: Kurs vs. SMA150 ------------------------------------------
+    debug_tbl = pd.DataFrame({
+        "price": latest,
+        "SMA150": sma,
+        "diff%": (latest / sma - 1) * 100
+    }).round(2)
+    print("\nDEBUG Price vs SMA150")
+    print(debug_tbl.to_string())
+    print("Eligible:", list(eligible), "\n")
+    # -----------------------------------------------------------------------
 
     if eligible.empty:
-        top  = pd.Series(dtype=float)
+        top = pd.Series(dtype=float)
         hold: List[str] = []
     else:
         top  = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
@@ -101,17 +115,17 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
 
     print("DEBUG top tickers:", hold)
 
-    # Verlaufsdatei schreiben (auch Cash-Monate)
+    # Verlauf schreiben (auch Cash‑Monate)
     with open(HIST_FILE, "a") as f:
         f.write(f"{m_end:%F};{','.join(hold)}\n")
 
-    # Meldetext
+    # Meldung
     subj = f"GAA Rebalance ({m_end:%b %Y})"
     body = [
         f"Neu kaufen: {', '.join(sorted(set(hold) - set(prev)))}" if hold else "Neu kaufen: –",
         f"Aktuelles Portfolio: {', '.join(hold) if hold else 'Cash'}",
         "",
-        "Momentum‑Scores:" if not top.empty else "Keine eligible Assets",
+        "Momentum‑Scores:" if not top.empty else "Keine eligible Assets"
     ]
     if not top.empty:
         body += [f"{t}: {sc:+.2%}" for t, sc in top.items()]
