@@ -61,7 +61,7 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
         return "GAA‑Fehler", None, "Keine Kursdaten verfügbar."
 
     # Momentum‑Score
-    mon = hist.resample("M").last()
+    mon = hist.resample("ME").last()
     mom = (
         mon.pct_change(1).iloc[-1] +
         mon.pct_change(3).iloc[-1] +
