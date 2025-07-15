@@ -52,7 +52,7 @@ jobs:
         if: env.CONTENT != ''
         env:
           CONTENT: ${{ env.CONTENT }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.WEBHOOK_GAA }}
         run: |
           curl -s -X POST -H "Content-Type: application/json" \
                -d "{\"content\": ${CONTENT} }" \
