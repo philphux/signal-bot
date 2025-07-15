@@ -1,9 +1,8 @@
 name: Notify GAA Momentum
 
 on:
-  # lieber nur einmal pro Tag (UTC 00:30)
   schedule:
-    - cron: "30 0 * * *"
+    - cron: "30 0 * * *"      # täglich 00:30 UTC
   workflow_dispatch:
 
 permissions:
@@ -12,33 +11,64 @@ permissions:
 jobs:
   gaa:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
+      # ------------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-      - uses: actions/setup-python@v4
-        with: { python-version: "3.11" }
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
 
-      - run: |
+      - name: Install dependencies
+        run: |
           python -m pip install --upgrade pip
           pip install yahooquery yfinance pandas jq
 
+      # ------------------------------------------------------------------
       - name: Run GAA script
         run: python main_gaa.py
 
+      # **** Debug‑Schritt: zeigt alle Dateien im Workspace ****
+      - name: Show workspace tree
+        run: |
+          echo "=== Workspace after script run ==="
+          ls -R
+
+      # ------------------------------------------------------------------
+      - name: Read content from file
+        id: read_file
+        run: |
+          if [[ -s message.txt ]]; then
+            CONTENT=$(jq -Rs . < message.txt)
+            echo "CONTENT=$CONTENT" >> $GITHUB_ENV
+          else
+            echo "CONTENT=" >> $GITHUB_ENV
+          fi
+
       - name: Send to Discord
-        if: success() && (steps.generate.outputs.size != '0')
+        if: env.CONTENT != ''
         env:
+          CONTENT: ${{ env.CONTENT }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          [ -s message.txt ] || exit 0
-          content=$(jq -Rs . < message.txt)
-          curl -X POST -H "Content-Type: application/json" \
-               -d "{\"content\": ${content} }" "$DISCORD_WEBHOOK_URL"
+          curl -s -X POST -H "Content-Type: application/json" \
+               -d "{\"content\": ${CONTENT} }" \
+               "$DISCORD_WEBHOOK_URL"
 
+      # ------------------------------------------------------------------
       - name: Commit gaa_history
         run: |
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          [ -e gaa_history.csv ] && git add gaa_history.csv
-          git commit -m "Update GAA history" || exit 0
-          git push
+
+          # gaa_history.csv versionieren, wenn vorhanden
+          if [[ -f gaa_history.csv ]]; then
+            git add gaa_history.csv
+            git commit -m "Update GAA history" || echo "nothing to commit"
+            git push || echo "nothing to push"
+          else
+            echo "No gaa_history.csv found – nothing to commit."
+          fi
