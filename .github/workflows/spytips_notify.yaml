@@ -2,7 +2,7 @@ name: Notify SPY‑TIPS Strategy
 
 on:
   schedule:
-    - cron: "0 12 * * *"      # Beispiel: täglich 12 UTC
+    - cron: "30 0 * * *"      # Beispiel: täglich 0:30 UTC
   workflow_dispatch:
 
 permissions:
