@@ -2,7 +2,7 @@ name: Notify GAA Momentum
 
 on:
   schedule:
-    - cron: "30 0 * * *"      # täglich 00:30 UTC
+    - cron: "0 6 * * *"      # "0 6 1 * *" am 1. Kalendertag
   workflow_dispatch:
 
 permissions:
