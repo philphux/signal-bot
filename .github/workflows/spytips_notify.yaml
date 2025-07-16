@@ -1,52 +1,73 @@
 name: Notify SPY‑TIPS Strategy
 
+# ────────────────────────────────────────────────────────────────
 on:
   schedule:
-    - cron: "30 0 * * *"      # Beispiel: täglich 0:30 UTC
+    # täglich 12 UTC
+    - cron: "0 12 * * *"
   workflow_dispatch:
-
+# ────────────────────────────────────────────────────────────────
 permissions:
   contents: write
-
+# ────────────────────────────────────────────────────────────────
 jobs:
   spy_tips:
     runs-on: ubuntu-latest
 
     steps:
-      # ---------------------------------------------------------------
-      - name: Checkout
-        uses: actions/checkout@v3
+    # 1) Code holen
+    - name: Checkout repository
+      uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
+    # 2) Python 3.11 einrichten
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
 
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install yahooquery pandas jq
+    # 3) Abhängigkeiten
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install yahooquery pandas jq
 
-      # ---------------------------------------------------------------
-      - name: Run SPY‑TIPS script
-        run: python main_spy_tips.py
+    # 4) Skript ausführen → message.txt schreiben
+    - name: Run SPY‑TIPS script
+      run: python main_spy_tips.py
 
-      - name: Read content from file
-        id: read_file
-        run: |
-          if [[ -s message.txt ]]; then
-            CONTENT=$(jq -Rs . < message.txt)   # JSON‑safe
-            echo "CONTENT=$CONTENT" >> $GITHUB_ENV
-          else
-            echo "CONTENT=" >> $GITHUB_ENV
-          fi
+    # 5) message.txt (falls vorhanden) in $CONTENT übernehmen
+    - name: Read content from file
+      id: read_file
+      run: |
+        if [[ -s message.txt ]]; then          # Datei existiert & nicht leer
+          CONTENT=$(jq -Rs . < message.txt)    # JSON‑safe escapen
+          echo "CONTENT=$CONTENT" >> $GITHUB_ENV
+        else
+          echo "CONTENT=" >> $GITHUB_ENV       # leer lassen
+        fi
 
-      - name: Send notification to Discord
-        if: env.CONTENT != ''                   # <<< gültige Expression
-        env:
-          CONTENT: ${{ env.CONTENT }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.WEBHOOK_SPY }}
-        run: |
-          curl -s -X POST -H "Content-Type: application/json" \
-               -d "{\"content\": ${CONTENT} }" \
-               "$DISCORD_WEBHOOK_URL"
+    # 6) Nur wenn CONTENT nicht leer → an Discord senden
+    - name: Send notification to Discord
+      if: env.CONTENT != ''
+      env:
+        CONTENT: ${{ env.CONTENT }}
+        DISCORD_WEBHOOK_URL: ${{ secrets.WEBHOOK_SPY }}
+      run: |
+        curl -s -X POST -H "Content-Type: application/json" \
+             -d "{\"content\": ${CONTENT} }" \
+             "$DISCORD_WEBHOOK_URL"
+
+    # 7) spy_tips_history.csv ins Repo commiten (falls neu/aktualisiert)
+    - name: Commit history
+      run: |
+        git config --global user.name  "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+        # nur hinzufügen, wenn Datei existiert
+        if [[ -e spy_tips_history.csv ]]; then
+          git add spy_tips_history.csv
+          git commit -m "Update SPY‑TIPS history" || echo "Nothing to commit"
+          git push || echo "Nothing to push"
+        else
+          echo "No history file to commit."
+        fi
