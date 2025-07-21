@@ -1,28 +1,31 @@
 """
-SPY‑/TIPS‑Spread‑Strategie  –  tägliche Meldung, History bei Signalwechsel
+SPY‑/TIPS‑Spread‑Strategie
+Sendet NICHTS, wenn sich gegenüber dem Vortag weder Signal noch Spread geändert haben
+(z. B. Börsen‑Wochenende mit identischen Schlusskursen).
 
-• Signal  : BUY  wenn Momentum SPY > TIPS, sonst SELL
-• History : Eine Zeile pro Tag *falls* Signal für den Tag neu ist
-• Discord  :
-    ‑ Änderung → Subjekt "GO BUY/SELL NOW …"
-    ‑ Unverändert → Subjekt "Signal BUY/SELL (unverändert)"
+• History  : Eine Zeile pro Kalendertag (Signal + Spread), wenn noch nicht vorhanden.
+• Discord  : Nachricht nur, wenn
+               – Signal BUY ↔ SELL wechselt  ODER
+               – Spread (auf 2 Nachkommastellen) sich geändert hat.
 """
 
 from __future__ import annotations
 from datetime import datetime, timezone
 import os
 import yahooquery as yq
+from math import isclose
 
 SPY, TIPS = "SPY", "TIP"
 HIST_FILE = "spy_tips_history.csv"
 COOLDOWN_DAYS = 0
+TOL = 0.005          # ±0.005 %, um Rundungsrauschen abzufangen
 
-# ---------------------------------------------------------------------- #
+# ─────────────────────────────────────────────────────────────── #
 def _momentum(ticker: str) -> float:
     hist = yq.Ticker(ticker).history(period="1y")["close"]
     return (hist.iloc[-1] / hist.iloc[0] - 1) * 100   # Prozent
 
-# ---------------------------------------------------------------------- #
+# ─────────────────────────────────────────────────────────────── #
 def spy_tips_cool():
     spy_mom  = _momentum(SPY)
     tips_mom = _momentum(TIPS)
@@ -30,29 +33,39 @@ def spy_tips_cool():
     signal   = "BUY" if diff_pct > 0 else "SELL"
 
     today = datetime.now(timezone.utc).date()
-    last_sig = None
 
-    # --- History lesen ----------------------------------------------------
-    history_exists = os.path.exists(HIST_FILE) and os.path.getsize(HIST_FILE)
-    if history_exists:
+    # -------- History lesen ------------------------------------
+    last_sig = last_diff = None
+    if os.path.exists(HIST_FILE) and os.path.getsize(HIST_FILE):
         last_line  = open(HIST_FILE).read().strip().splitlines()[-1]
-        last_date, last_sig, *_ = last_line.split(",")
+        last_date, last_sig, last_diff, *_ = last_line.split(",")
+        last_diff = float(last_diff)
 
-    # --- History schreiben, wenn für heute noch nicht vorhanden ----------
-    if (not history_exists) or last_date != today.isoformat():
-        header_needed = not history_exists
+    # -------- History schreiben (einmal pro Tag) ----------------
+    if (last_sig is None) or (last_date != today.isoformat()):
+        first_line = not os.path.exists(HIST_FILE)
         with open(HIST_FILE, "a") as f:
-            if header_needed:
+            if first_line:
                 f.write("date,signal,diff_pct,spy_mom,tips_mom\n")
             f.write(f"{today},{signal},{diff_pct:.2f},{spy_mom:.2f},{tips_mom:.2f}\n")
 
-    # --- Subjekt ----------------------------------------------------------
+    # -------- Entscheiden, ob wir senden ------------------------
+    must_send = False
     if last_sig is None or last_sig != signal:
-        subj = f"GO {signal} NOW (cooldown activated for {COOLDOWN_DAYS} days)"
-    else:
-        subj = f"Signal {signal} (unverändert)"
+        must_send = True                         # Signalwechsel
+    elif not isclose(diff_pct, last_diff or 0, abs_tol=TOL):
+        must_send = True                         # Spread bewegt
 
-    # --- Nachrichtentext --------------------------------------------------
+    if not must_send:
+        return None, None, None                 # nichts an Discord schicken
+
+    # -------- Nachricht zusammenstellen -------------------------
+    subj = (
+        f"GO {signal} NOW (cooldown activated for {COOLDOWN_DAYS} days)"
+        if last_sig != signal
+        else f"Signal {signal} (Spread geändert)"
+    )
+
     body = [
         f"Currently in market ({COOLDOWN_DAYS} cooldown days remaining)",
         f"The SIGNAL is {signal}",
