@@ -63,7 +63,7 @@ def spy_tips_cool():
     subj = (
         f"GO {signal} NOW (cooldown activated for {COOLDOWN_DAYS} days)"
         if last_sig != signal
-        else f"Signal {signal} (Spread geändert)"
+        else f"Signal {signal}"
     )
 
     body = [
