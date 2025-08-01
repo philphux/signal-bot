@@ -1,4 +1,3 @@
-# strategies/gaa_momentum.py
 """
 Global-Asset-Allocation – Momentum (Top-3, Cash-Fallback)
 """
@@ -16,8 +15,9 @@ NAMES   = {
     "USO": "WTI Crude Oil", "EEM": "Emerging Markets",
     "FEZ": "Euro Stoxx 50", "IEF": "Treasury Bonds", "CASH": "Cash",
 }
-TOP_N, SMA_LEN = 3, 150
-HIST_FILE      = "gaa_history.csv"
+TOP_N, SMA_LEN      = 3, 150
+SHOW_TOP_MOM        = 5          # wie viele Momentum-Scores anzeigen
+HIST_FILE           = "gaa_history.csv"
 nice = lambda xs: ", ".join(NAMES.get(x, x) for x in xs) if xs else "–"
 
 # ───────── Helper ───────────────────────────────────────────────────
@@ -28,31 +28,23 @@ def _to_dt(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_index()
 
 def _pivot_raw(raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Extrahiert die Adj-Close-Spalte(n) **unabhängig** davon,
-    ob der Multi-Index als ('Adj Close','QQQ') oder ('QQQ','Adj Close')
-    aufgebaut ist.
-    """
+    """Extrahiert Adj-Close unabhängig von MultiIndex-Variante."""
     if not isinstance(raw.columns, pd.MultiIndex):
         col = "Adj Close" if "Adj Close" in raw else "Close"
         return raw[[col]].rename(columns={col: TICKERS[0]})
 
-    # falls Level-0 die Ticker enthält → Levels tauschen
+    # Ebenen tauschen, falls Level-0 die Ticker enthält
     if raw.columns.get_level_values(0)[0] in TICKERS:
         raw = raw.swaplevel(0, 1, axis=1)
 
-    fields = raw.columns.get_level_values(0)
-    if "Adj Close" in fields:
-        df = raw.xs("Adj Close", level=0, axis=1)
-    else:
-        df = raw.xs("Close", level=0, axis=1)
-
+    fld = raw.columns.get_level_values(0)
+    sel = "Adj Close" if "Adj Close" in fld else "Close"
+    df  = raw.xs(sel, level=0, axis=1)
     df.columns.name = None
     return df
 
 def _fetch_daily() -> pd.DataFrame:
-    """2 Jahre Tages-Adj-Close – yahooquery → yfinance Fallback."""
-    # ---------- 1) yahooquery ----------
+    """2 Jahre Tagesdaten (Adj-Close) · yahooquery → yfinance Fallback."""
     try:
         tq  = yq.Ticker(" ".join(TICKERS))
         raw = tq.history(period="2y", interval="1d", adj_ohlc=True)
@@ -67,21 +59,15 @@ def _fetch_daily() -> pd.DataFrame:
     except Exception:
         pass
 
-    # ---------- 2) yfinance ----------
-    raw = yf.download(
-        tickers=" ".join(TICKERS),
-        period="2y", interval="1d",
-        auto_adjust=False, threads=False, progress=False
-    )
+    raw = yf.download(" ".join(TICKERS), period="2y", interval="1d",
+                      auto_adjust=False, progress=False, threads=False)
     return _to_dt(_pivot_raw(raw))
 
-def _monthly_close(daily: pd.DataFrame) -> pd.DataFrame:
-    """Letzter Handelstag je Monat (Excel-kompatibel)."""
-    return daily.resample("M").last()
+def _monthly_close(d: pd.DataFrame) -> pd.DataFrame:
+    return d.resample("M").last()
 
 # ───────── Strategie ────────────────────────────────────────────────
 def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
-    # Tagesdaten & SMA ------------------------------------------------
     daily = _fetch_daily().ffill()
     if daily.empty:
         return "GAA-Fehler", None, "Keine Kursdaten verfügbar."
@@ -90,7 +76,7 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     if mon.index[-1].month != pd.Timestamp.utcnow().month:
         mon.loc[daily.index[-1]] = daily.iloc[-1]
 
-    # Momentum-Score --------------------------------------------------
+    # Momentum 1+3+6+9 Monate (ungefiltert)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "The default fill_method")
         mom = (
@@ -100,12 +86,12 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
             (mon / mon.shift(9) - 1)
         ).iloc[-1].dropna()
 
-    price = daily.iloc[-1];  sma = daily.rolling(SMA_LEN).mean().iloc[-1]
-    eligible = mom.index[(price > sma) & price.notna() & sma.notna()]
-    top      = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
-    hold     = list(top.index) + ["CASH"] * (TOP_N - len(top))
+    price, sma = daily.iloc[-1], daily.rolling(SMA_LEN).mean().iloc[-1]
+    eligible   = mom.index[(price > sma) & price.notna() & sma.notna()]
+    top        = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
+    hold       = list(top.index) + ["CASH"] * (TOP_N - len(top))
 
-    # History ---------------------------------------------------------
+    # ── History ------------------------------------------------------
     prev: List[str] = []
     if os.path.isfile(HIST_FILE) and os.path.getsize(HIST_FILE):
         prev = open(HIST_FILE).read().splitlines()[-1].split(";")[1].split(",")
@@ -121,7 +107,7 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
                 f.write("date;portfolio\n")
             f.write(f"{m_end:%F};{','.join(hold)}\n")
 
-    # Discord-Text ----------------------------------------------------
+    # ── Discord-Text -------------------------------------------------
     m_end = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
     parts: List[str] = []
     if buys:  parts.append(f"Kaufen: {nice(buys)}")
@@ -131,9 +117,11 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
         parts.append("Cash halten")
 
     parts.append(f"Aktuelles Portfolio: {nice(hold)}\n")
-    parts.append("Momentum-Scores:")
-    for t, sc in top.items():
-        parts.append(f"{NAMES.get(t,t)}: {sc:+.2%}")
+
+    parts.append("Momentum-Scores (Top 5, ungefiltert):")
+    for t, sc in mom.sort_values(ascending=False).head(SHOW_TOP_MOM).items():
+        mark = "  ⬅︎ SMA ok" if t in eligible else ""
+        parts.append(f"{NAMES.get(t,t)}: {sc:+.2%}{mark}")
 
     subject = f"GAA Rebalance ({m_end:%b %Y})"
     return subject, "", "\n".join(parts)
