@@ -1,5 +1,5 @@
 """
-Global Asset Allocation – Momentum (Top-3, Cash-Filler)
+Global Asset Allocation – Momentum (Top-3, Cash fallback)
 """
 
 from __future__ import annotations
@@ -7,24 +7,24 @@ import os, pandas as pd, yahooquery as yq
 from typing import List, Tuple
 
 TICKERS = ["BTC-USD", "QQQ", "GLD", "USO", "EEM", "FEZ", "IEF"]
-NAMES   = {
-    "BTC-USD": "Bitcoin", "QQQ": "Nasdaq-100", "GLD": "Gold",
-    "USO": "WTI Crude Oil", "EEM": "Emerging Markets",
-    "FEZ": "Euro Stoxx 50", "IEF": "Treasury Bonds", "CASH": "Cash",
+LABEL   = {
+    "BTC-USD":"Bitcoin","QQQ":"Nasdaq-100","GLD":"Gold","USO":"WTI Crude Oil",
+    "EEM":"Emerging Markets","FEZ":"Euro Stoxx 50","IEF":"Treasury Bonds",
+    "CASH":"Cash",
 }
 TOP_N, SMA_LEN = 3, 150
-HIST_FILE      = "gaa_history.csv"
+HIST_FILE = "gaa_history.csv"
 
-# ───────────────── helpers ────────────────────────────────────────────
+# ───────── helpers ────────────────────────────────────────────────────
 def _to_dt(df: pd.DataFrame) -> pd.DataFrame:
     idx = pd.to_datetime(df.index, errors="coerce", utc=True)
-    df  = df.loc[~idx.isna()].copy()
-    df.index = idx[~idx.isna()].tz_convert(None)
+    df  = df[idx.notna()].copy()
+    df.index = idx[idx.notna()].tz_convert(None)
     return df.sort_index()
 
-def _fetch(interval: str) -> pd.DataFrame:
+def _fetch(ivl: str) -> pd.DataFrame:
     tq = yq.Ticker(" ".join(TICKERS))
-    df = tq.history(period="2y", interval=interval, adj_ohlc=True)
+    df = tq.history(period="2y", interval=ivl, adj_ohlc=True)
     col = "adjclose" if "adjclose" in df.columns else "close"
     df  = df[col]
     if isinstance(df.index, pd.MultiIndex):
@@ -35,71 +35,67 @@ def _fetch(interval: str) -> pd.DataFrame:
 _fetch_daily   = lambda: _fetch("1d")
 _fetch_monthly = lambda: _fetch("1mo")
 
-def _last_price_sma(daily: pd.DataFrame):
-    price = daily.iloc[-1]
-    sma   = daily.rolling(SMA_LEN).mean().iloc[-1]
-    return price.dropna(), sma.dropna()
+nice = lambda xs: ", ".join(LABEL.get(x,x) for x in xs) if xs else "–"
 
-nice = lambda xs: ", ".join(NAMES.get(x, x) for x in xs) if xs else "–"
+# ───────── strategy ──────────────────────────────────────────────────
+def gaa_monthly_momentum() -> Tuple[str|None,str|None,str|None]:
 
-# ───────────────── strategy ───────────────────────────────────────────
-def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     daily = _fetch_daily()
     if daily.empty:
         return "GAA-Fehler", None, "Keine Kursdaten verfügbar."
 
+    # ---------------- Momentum (monatliche Kurse) --------------------
     mon = _fetch_monthly()
     if mon.index[-1].month != pd.Timestamp.utcnow().month:
         mon.loc[daily.index[-1]] = daily.iloc[-1]
 
     mom = (
-        mon.pct_change(1).iloc[-1] +
-        mon.pct_change(3).iloc[-1] +
-        mon.pct_change(6).iloc[-1] +
-        mon.pct_change(9).iloc[-1]
-    ).dropna()
+        mon.pct_change(1).iloc[-1].fillna(0) +
+        mon.pct_change(3).iloc[-1].fillna(0) +
+        mon.pct_change(6).iloc[-1].fillna(0) +
+        mon.pct_change(9).iloc[-1].fillna(0)
+    )
 
-    price, sma = _last_price_sma(daily)
+    # ---------------- Preis & SMA150 (Lücken füllen!) ---------------
+    daily_f = daily.ffill()
+    price   = daily.iloc[-1]
+    sma     = daily_f.rolling(SMA_LEN).mean().iloc[-1]
+    enough  = daily_f.notna().sum() >= SMA_LEN    # mind. 150 Werte?
 
-    # ---- DEBUG-Tabelle ----------------------------------------------
+    # ---------------- Debug -----------------------------------------
     dbg = pd.DataFrame({
         "momentum%": (mom*100).round(2),
-        "price":     price,
-        "SMA150":    sma
+        "price": price,
+        "SMA150": sma,
+        "≥150d": enough,
+        "SMA_OK": price > sma,
     })
-    dbg["diff%"]  = ((dbg["price"]/dbg["SMA150"] - 1)*100).round(2)
-    dbg["SMA_OK"] = dbg["price"] > dbg["SMA150"]
-    print("\n=== DEBUG Price vs SMA ===")
+    print("\n=== DEBUG ===================================================")
     print(dbg.to_string(float_format="%.2f"))
+    print("=============================================================\n")
 
-    # ---- eligible ----------------------------------------------------
-    eligible = [t for t in mom.index
-                if t in price.index
-                and t in sma.index
-                and price[t] > sma[t]]
+    # ---------------- Auswahl ---------------------------------------
+    eligible = [t for t in mom.index if enough[t] and price[t] > sma[t]]
+    top      = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
+    hold     = list(top.index) + ["CASH"]*(TOP_N - len(top))
 
-    top  = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
-    hold = list(top.index) + ["CASH"]*(TOP_N - len(top))
-
-    # ---- history -----------------------------------------------------
+    # ---------------- History-Datei ---------------------------------
     prev: List[str] = []
     if os.path.isfile(HIST_FILE) and os.path.getsize(HIST_FILE):
-        prev = (open(HIST_FILE)
-                .read().splitlines()[-1].split(";")[1].split(","))
+        prev = open(HIST_FILE).read().splitlines()[-1].split(";")[1].split(",")
 
     buys  = sorted([x for x in hold if hold.count(x) > prev.count(x)])
     sells = sorted([x for x in prev if prev.count(x) > hold.count(x)])
     holds = sorted(set(hold) & set(prev))
 
     if buys or sells or not prev:
-        m_end = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
+        stamp = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
         with open(HIST_FILE, "a") as f:
-            if os.path.getsize(HIST_FILE) == 0:
-                f.write("date;portfolio\n")
-            f.write(f"{m_end:%F};{','.join(hold)}\n")
+            if os.path.getsize(HIST_FILE)==0: f.write("date;portfolio\n")
+            f.write(f"{stamp:%F};{','.join(hold)}\n")
 
-    # ---- Discord message --------------------------------------------
-    m_end = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
+    # ---------------- Discord-Nachricht -----------------------------
+    stamp = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
     msg: List[str] = []
     if buys:  msg.append(f"Kaufen: {nice(buys)}")
     if sells: msg.append(f"Verkaufen: {nice(sells)}")
@@ -110,6 +106,6 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     msg.append(f"Aktuelles Portfolio: {nice(hold)}\n")
     msg.append("Momentum-Scores:")
     for t, sc in top.items():
-        msg.append(f"{NAMES.get(t,t)}: {sc:+.2%}")
+        msg.append(f"{LABEL.get(t,t)}: {sc:+.2%}")
 
-    return f"GAA Rebalance ({m_end:%b %Y})", "", "\n".join(msg)
+    return f"GAA Rebalance ({stamp:%b %Y})", "", "\n".join(msg)
