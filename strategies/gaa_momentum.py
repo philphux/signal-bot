@@ -1,23 +1,33 @@
+# strategies/gaa_momentum.py
 """
 Global-Asset-Allocation – Momentum (Top-3, Cash-Fallback)
+---------------------------------------------------------
+* Universum    : BTC-USD, QQQ, GLD, USO, EEM, FEZ, IEF
+* Momentum     : Σ %-Rendite 1 M + 3 M + 6 M + 9 M
+* Filter       : Schlusskurs > SMA150  (Adj Close → Close-Fallback)
+* Rebalance    : Monatsultimo, fehlende Plätze = Cash
+* History-File : gaa_history.csv
 """
 
 from __future__ import annotations
 import os, warnings
 from typing import List, Tuple
 
-import pandas as pd, yahooquery as yq, yfinance as yf
+import pandas as pd
+import yahooquery as yq
+import yfinance   as yf
 
 # ───────── Parameter ────────────────────────────────────────────────
 TICKERS = ["BTC-USD", "QQQ", "GLD", "USO", "EEM", "FEZ", "IEF"]
 NAMES   = {
-    "BTC-USD": "Bitcoin", "QQQ": "Nasdaq-100", "GLD": "Gold",
-    "USO": "WTI Crude Oil", "EEM": "Emerging Markets",
-    "FEZ": "Euro Stoxx 50", "IEF": "Treasury Bonds", "CASH": "Cash",
+    "BTC-USD": "Bitcoin",       "QQQ": "Nasdaq-100",
+    "GLD": "Gold",              "USO": "WTI Crude Oil",
+    "EEM": "Emerging Markets",  "FEZ": "Euro Stoxx 50",
+    "IEF": "Treasury Bonds",    "CASH": "Cash",
 }
-TOP_N, SMA_LEN      = 3, 150
-SHOW_TOP_MOM        = 5          # wie viele Momentum-Scores anzeigen
-HIST_FILE           = "gaa_history.csv"
+TOP_N, SMA_LEN       = 3, 150
+SHOW_TOP_MOM         = 5
+HIST_FILE            = "gaa_history.csv"
 nice = lambda xs: ", ".join(NAMES.get(x, x) for x in xs) if xs else "–"
 
 # ───────── Helper ───────────────────────────────────────────────────
@@ -28,23 +38,37 @@ def _to_dt(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_index()
 
 def _pivot_raw(raw: pd.DataFrame) -> pd.DataFrame:
-    """Extrahiert Adj-Close unabhängig von MultiIndex-Variante."""
-    if not isinstance(raw.columns, pd.MultiIndex):
-        col = "Adj Close" if "Adj Close" in raw else "Close"
-        return raw[[col]].rename(columns={col: TICKERS[0]})
+    """
+    Liefert ein Adj-Close-DataFrame (Fallback: Close) ohne NaNs;
+    erkennt beide Multi-Index-Varianten von yfinance.
+    """
+    def _single(df: pd.DataFrame, col: str, tgt: str) -> pd.DataFrame:
+        return df[[col]].rename(columns={col: tgt})
 
-    # Ebenen tauschen, falls Level-0 die Ticker enthält
+    if not isinstance(raw.columns, pd.MultiIndex):
+        # Single-Ticker-Download
+        if "Adj Close" in raw and not raw["Adj Close"].isna().any():
+            return _single(raw, "Adj Close", TICKERS[0])
+        return _single(raw, "Close", TICKERS[0])
+
+    # Multi-Ticker: ggf. Ebenen tauschen, so dass Ebene-0 die Felder enthält
     if raw.columns.get_level_values(0)[0] in TICKERS:
         raw = raw.swaplevel(0, 1, axis=1)
 
-    fld = raw.columns.get_level_values(0)
-    sel = "Adj Close" if "Adj Close" in fld else "Close"
-    df  = raw.xs(sel, level=0, axis=1)
+    for field in ("Adj Close", "Close"):
+        df = raw.xs(field, level=0, axis=1)
+        if not df.isna().any().any():
+            df.columns.name = None
+            return df
+
+    # Letzte Rettung – NaNs ggf. belassen
+    df = raw.xs("Close", level=0, axis=1)
     df.columns.name = None
     return df
 
 def _fetch_daily() -> pd.DataFrame:
-    """2 Jahre Tagesdaten (Adj-Close) · yahooquery → yfinance Fallback."""
+    """2 Jahre Tages-Adj-Close (yahooquery → yfinance Fallback)"""
+    # 1) yahooquery
     try:
         tq  = yq.Ticker(" ".join(TICKERS))
         raw = tq.history(period="2y", interval="1d", adj_ohlc=True)
@@ -59,12 +83,17 @@ def _fetch_daily() -> pd.DataFrame:
     except Exception:
         pass
 
+    # 2) yfinance
     raw = yf.download(" ".join(TICKERS), period="2y", interval="1d",
                       auto_adjust=False, progress=False, threads=False)
     return _to_dt(_pivot_raw(raw))
 
-def _monthly_close(d: pd.DataFrame) -> pd.DataFrame:
-    return d.resample("M").last()
+def _monthly_close(daily: pd.DataFrame) -> pd.DataFrame:
+    """Letzter Handelstag pro Monat – fehlende schliessen."""
+    mon = daily.resample("M").last()
+    # fehlende Monats-Closes mit letztem Kurs vor Monatsende auffüllen
+    filler = daily.resample("M").ffill().last()
+    return mon.combine_first(filler)
 
 # ───────── Strategie ────────────────────────────────────────────────
 def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
@@ -76,7 +105,7 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     if mon.index[-1].month != pd.Timestamp.utcnow().month:
         mon.loc[daily.index[-1]] = daily.iloc[-1]
 
-    # Momentum 1+3+6+9 Monate (ungefiltert)
+    # Momentum-Score
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "The default fill_method")
         mom = (
@@ -86,10 +115,11 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
             (mon / mon.shift(9) - 1)
         ).iloc[-1].dropna()
 
-    price, sma = daily.iloc[-1], daily.rolling(SMA_LEN).mean().iloc[-1]
-    eligible   = mom.index[(price > sma) & price.notna() & sma.notna()]
-    top        = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
-    hold       = list(top.index) + ["CASH"] * (TOP_N - len(top))
+    price = daily.iloc[-1]
+    sma   = daily.rolling(SMA_LEN).mean().iloc[-1]
+    eligible = mom.index[(price > sma) & price.notna() & sma.notna()]
+    top      = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
+    hold     = list(top.index) + ["CASH"] * (TOP_N - len(top))
 
     # ── History ------------------------------------------------------
     prev: List[str] = []
@@ -117,8 +147,7 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
         parts.append("Cash halten")
 
     parts.append(f"Aktuelles Portfolio: {nice(hold)}\n")
-
-    parts.append("Momentum-Scores (Top 5, ungefiltert):")
+    parts.append("Momentum-Scores (Top-5, ungefiltert):")
     for t, sc in mom.sort_values(ascending=False).head(SHOW_TOP_MOM).items():
         mark = "  ⬅︎ SMA ok" if t in eligible else ""
         parts.append(f"{NAMES.get(t,t)}: {sc:+.2%}{mark}")
