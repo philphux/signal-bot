@@ -3,21 +3,19 @@ Global Asset Allocation – Momentum (Top-3, Cash-Filler)
 """
 
 from __future__ import annotations
-import os
+import os, pandas as pd, yahooquery as yq
 from typing import List, Tuple
-import pandas as pd, yahooquery as yq
 
 TICKERS = ["BTC-USD", "QQQ", "GLD", "USO", "EEM", "FEZ", "IEF"]
 NAMES   = {
-    "BTC-USD": "Bitcoin",        "QQQ": "Nasdaq-100",
-    "GLD": "Gold",               "USO": "WTI Crude Oil",
-    "EEM": "Emerging Markets",   "FEZ": "Euro Stoxx 50",
-    "IEF": "Treasury Bonds",     "CASH": "Cash",
+    "BTC-USD": "Bitcoin", "QQQ": "Nasdaq-100", "GLD": "Gold",
+    "USO": "WTI Crude Oil", "EEM": "Emerging Markets",
+    "FEZ": "Euro Stoxx 50", "IEF": "Treasury Bonds", "CASH": "Cash",
 }
 TOP_N, SMA_LEN = 3, 150
 HIST_FILE      = "gaa_history.csv"
 
-# ──────────────────────────────────────────────────────────────────────
+# ───────────────── helpers ────────────────────────────────────────────
 def _to_dt(df: pd.DataFrame) -> pd.DataFrame:
     idx = pd.to_datetime(df.index, errors="coerce", utc=True)
     df  = df.loc[~idx.isna()].copy()
@@ -37,14 +35,14 @@ def _fetch(interval: str) -> pd.DataFrame:
 _fetch_daily   = lambda: _fetch("1d")
 _fetch_monthly = lambda: _fetch("1mo")
 
-def _last_price_and_sma(daily: pd.DataFrame):
+def _last_price_sma(daily: pd.DataFrame):
     price = daily.iloc[-1]
     sma   = daily.rolling(SMA_LEN).mean().iloc[-1]
     return price.dropna(), sma.dropna()
 
-_name = lambda lst: ", ".join(NAMES.get(x, x) for x in lst) if lst else "–"
+nice = lambda xs: ", ".join(NAMES.get(x, x) for x in xs) if xs else "–"
 
-# ──────────────────────────────────────────────────────────────────────
+# ───────────────── strategy ───────────────────────────────────────────
 def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     daily = _fetch_daily()
     if daily.empty:
@@ -61,21 +59,33 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
         mon.pct_change(9).iloc[-1]
     ).dropna()
 
-    price, sma = _last_price_and_sma(daily)
+    price, sma = _last_price_sma(daily)
 
-    # ── **Fix: einzeln prüfen, ob SMA vorhanden und Preis > SMA** ─────
-    eligible = [
-        t for t in mom.index
-        if (t in price.index) and (t in sma.index) and (price[t] > sma[t])
-    ]
+    # ---- DEBUG-Tabelle ----------------------------------------------
+    dbg = pd.DataFrame({
+        "momentum%": (mom*100).round(2),
+        "price":     price,
+        "SMA150":    sma
+    })
+    dbg["diff%"]  = ((dbg["price"]/dbg["SMA150"] - 1)*100).round(2)
+    dbg["SMA_OK"] = dbg["price"] > dbg["SMA150"]
+    print("\n=== DEBUG Price vs SMA ===")
+    print(dbg.to_string(float_format="%.2f"))
+
+    # ---- eligible ----------------------------------------------------
+    eligible = [t for t in mom.index
+                if t in price.index
+                and t in sma.index
+                and price[t] > sma[t]]
 
     top  = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
-    hold = list(top.index) + ["CASH"] * (TOP_N - len(top))
+    hold = list(top.index) + ["CASH"]*(TOP_N - len(top))
 
-    # ───────────────── Verlauf sichern ────────────────────────────────
+    # ---- history -----------------------------------------------------
     prev: List[str] = []
     if os.path.isfile(HIST_FILE) and os.path.getsize(HIST_FILE):
-        prev = open(HIST_FILE).read().splitlines()[-1].split(";")[1].split(",")
+        prev = (open(HIST_FILE)
+                .read().splitlines()[-1].split(";")[1].split(","))
 
     buys  = sorted([x for x in hold if hold.count(x) > prev.count(x)])
     sells = sorted([x for x in prev if prev.count(x) > hold.count(x)])
@@ -88,18 +98,18 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
                 f.write("date;portfolio\n")
             f.write(f"{m_end:%F};{','.join(hold)}\n")
 
-    # ───────────────── Discord-Nachricht ──────────────────────────────
+    # ---- Discord message --------------------------------------------
     m_end = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
-    lines: List[str] = []
-    if buys:  lines.append(f"Kaufen: {_name(buys)}")
-    if sells: lines.append(f"Verkaufen: {_name(sells)}")
-    if holds: lines.append(f"Halten: {_name(holds)}")
+    msg: List[str] = []
+    if buys:  msg.append(f"Kaufen: {nice(buys)}")
+    if sells: msg.append(f"Verkaufen: {nice(sells)}")
+    if holds: msg.append(f"Halten: {nice(holds)}")
     if not (buys or sells or holds):
-        lines.append("Cash halten")
+        msg.append("Cash halten")
 
-    lines.append(f"Aktuelles Portfolio: {_name(hold)}\n")
-    lines.append("Momentum-Scores:")
+    msg.append(f"Aktuelles Portfolio: {nice(hold)}\n")
+    msg.append("Momentum-Scores:")
     for t, sc in top.items():
-        lines.append(f"{NAMES.get(t,t)}: {sc:+.2%}")
+        msg.append(f"{NAMES.get(t,t)}: {sc:+.2%}")
 
-    return f"GAA Rebalance ({m_end:%b %Y})", "", "\n".join(lines)
+    return f"GAA Rebalance ({m_end:%b %Y})", "", "\n".join(msg)
