@@ -1,9 +1,5 @@
 """
 Global Asset Allocation – Momentum (Top-3, Cash-Filler)
-------------------------------------------------------
-Momentum  = Σ Rendite (1 / 3 / 6 / 9 Monate)
-Filter    = Schlusskurs > SMA150 (Tagesdaten)
-Rebalance = Monatsende
 """
 
 from __future__ import annotations
@@ -13,14 +9,15 @@ import pandas as pd, yahooquery as yq
 
 TICKERS = ["BTC-USD", "QQQ", "GLD", "USO", "EEM", "FEZ", "IEF"]
 NAMES   = {
-    "BTC-USD": "Bitcoin", "QQQ": "Nasdaq-100", "GLD": "Gold",
-    "USO": "WTI Crude Oil", "EEM": "Emerging Markets",
-    "FEZ": "Euro Stoxx 50", "IEF": "Treasury Bonds", "CASH": "Cash",
+    "BTC-USD": "Bitcoin",        "QQQ": "Nasdaq-100",
+    "GLD": "Gold",               "USO": "WTI Crude Oil",
+    "EEM": "Emerging Markets",   "FEZ": "Euro Stoxx 50",
+    "IEF": "Treasury Bonds",     "CASH": "Cash",
 }
 TOP_N, SMA_LEN = 3, 150
-HIST_FILE = "gaa_history.csv"
+HIST_FILE      = "gaa_history.csv"
 
-# ───────────────────────── Daten-Helper ───────────────────────────────
+# ──────────────────────────────────────────────────────────────────────
 def _to_dt(df: pd.DataFrame) -> pd.DataFrame:
     idx = pd.to_datetime(df.index, errors="coerce", utc=True)
     df  = df.loc[~idx.isna()].copy()
@@ -45,10 +42,9 @@ def _last_price_and_sma(daily: pd.DataFrame):
     sma   = daily.rolling(SMA_LEN).mean().iloc[-1]
     return price.dropna(), sma.dropna()
 
-def _nice(names: List[str]) -> str:
-    return ", ".join(NAMES.get(n, n) for n in names) if names else "–"
+_name = lambda lst: ", ".join(NAMES.get(x, x) for x in lst) if lst else "–"
 
-# ───────────────────────── Hauptfunktion ──────────────────────────────
+# ──────────────────────────────────────────────────────────────────────
 def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     daily = _fetch_daily()
     if daily.empty:
@@ -67,14 +63,16 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
 
     price, sma = _last_price_and_sma(daily)
 
-    valid = price.index.intersection(sma.index)        # gemeinsame Ticker
-    mask  = (price[valid] > sma[valid])                # Bool-SMA-Filter
-    eligible = mask[mask].index                        # nur True-Ticker
+    # ── **Fix: einzeln prüfen, ob SMA vorhanden und Preis > SMA** ─────
+    eligible = [
+        t for t in mom.index
+        if (t in price.index) and (t in sma.index) and (price[t] > sma[t])
+    ]
 
-    top = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
-    hold = list(top.index) + ["CASH"]*(TOP_N - len(top))
+    top  = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
+    hold = list(top.index) + ["CASH"] * (TOP_N - len(top))
 
-    # ───── Verlauf speichern ─────
+    # ───────────────── Verlauf sichern ────────────────────────────────
     prev: List[str] = []
     if os.path.isfile(HIST_FILE) and os.path.getsize(HIST_FILE):
         prev = open(HIST_FILE).read().splitlines()[-1].split(";")[1].split(",")
@@ -90,16 +88,16 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
                 f.write("date;portfolio\n")
             f.write(f"{m_end:%F};{','.join(hold)}\n")
 
-    # ───── Discord-Nachricht ─────
+    # ───────────────── Discord-Nachricht ──────────────────────────────
     m_end = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
     lines: List[str] = []
-    if buys:  lines.append(f"Kaufen: {_nice(buys)}")
-    if sells: lines.append(f"Verkaufen: {_nice(sells)}")
-    if holds: lines.append(f"Halten: {_nice(holds)}")
+    if buys:  lines.append(f"Kaufen: {_name(buys)}")
+    if sells: lines.append(f"Verkaufen: {_name(sells)}")
+    if holds: lines.append(f"Halten: {_name(holds)}")
     if not (buys or sells or holds):
         lines.append("Cash halten")
 
-    lines.append(f"Aktuelles Portfolio: {_nice(hold)}\n")
+    lines.append(f"Aktuelles Portfolio: {_name(hold)}\n")
     lines.append("Momentum-Scores:")
     for t, sc in top.items():
         lines.append(f"{NAMES.get(t,t)}: {sc:+.2%}")
