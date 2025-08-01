@@ -1,97 +1,100 @@
 """
-Global Asset Allocation – Momentum
+Global-Asset-Allocation – Momentum
 ----------------------------------
-• Momentum-Score  = Σ Rendite (1 / 3 / 6 / 9 Monate)  
-  – Basis: Adj Close, Monats-Schluss  
-• Filter          = Schlusskurs > SMA 150 (Tages-Adj Close)  
-• Rebalance       = Monatsende, Top-3; fehlende Positionen = Cash  
-• Verlauf         = gaa_history.csv (wird nur ergänzt, wenn sich das
-  Portfolio ändert)
+• Universum        BTC-USD, QQQ, GLD, USO, EEM, FEZ, IEF
+• Momentum-Score   Σ Rendite(1 + 3 + 6 + 9 Monate)
+  – Monats-Schluss (letzter Handelstag des Monats)
+• Filter           Schlusskurs > SMA150 (täglicher Adj-Close)
+• Rebalance        Monatsultimo, Top-3; fehlende Positionen = Cash
+• History          gaa_history.csv  (wird nur ergänzt, wenn Portfolio
+  sich ändert)
 """
 
 from __future__ import annotations
-import os
+import os, warnings
 from typing import List, Tuple
-import pandas as pd, yahooquery as yq
+
+import pandas as pd
+import yahooquery as yq
 
 # ───────── Parameter ────────────────────────────────────────────────
 TICKERS = ["BTC-USD", "QQQ", "GLD", "USO", "EEM", "FEZ", "IEF"]
 NAMES   = {
-    "BTC-USD": "Bitcoin",        "QQQ": "Nasdaq-100",   "GLD": "Gold",
-    "USO": "WTI Crude Oil",      "EEM": "Emerging Markets",
-    "FEZ": "Euro Stoxx 50",      "IEF": "Treasury Bonds",
+    "BTC-USD": "Bitcoin", "QQQ": "Nasdaq-100", "GLD": "Gold",
+    "USO": "WTI Crude Oil", "EEM": "Emerging Markets",
+    "FEZ": "Euro Stoxx 50", "IEF": "Treasury Bonds",
     "CASH": "Cash",
 }
 TOP_N, SMA_LEN = 3, 150
 HIST_FILE      = "gaa_history.csv"
 
-# ───────── Helper: Daten laden & indizieren ─────────────────────────
+# ───────── Helper ───────────────────────────────────────────────────
 def _to_dt(df: pd.DataFrame) -> pd.DataFrame:
     idx = pd.to_datetime(df.index, errors="coerce", utc=True)
     df  = df.loc[~idx.isna()].copy()
-    df.index = idx[~idx.isna()].tz_convert(None)   # tz-naiv
+    df.index = idx[~idx.isna()].tz_convert(None)        # tz-naiv
     return df.sort_index()
 
-def _fetch(interval: str) -> pd.DataFrame:
+def _fetch_daily() -> pd.DataFrame:
     tq = yq.Ticker(" ".join(TICKERS))
-    df = tq.history(period="2y", interval=interval, adj_ohlc=True)
-    col = "adjclose" if "adjclose" in df.columns else "close"
-    df  = df[col]
+    df = tq.history(period="2y", interval="1d", adj_ohlc=True)["adjclose"]
     if isinstance(df.index, pd.MultiIndex):
         df = (df.reset_index()
-                .pivot(index="date", columns="symbol", values=col))
+                .pivot(index="date", columns="symbol", values="adjclose"))
     return _to_dt(df)
 
-_fetch_daily   = lambda: _fetch("1d")
-_fetch_monthly = lambda: _fetch("1mo")
-nice           = lambda xs: ", ".join(NAMES.get(x, x) for x in xs) if xs else "–"
+def _monthly_close(daily: pd.DataFrame) -> pd.DataFrame:
+    """Letzter Handelstag pro Monat (wie Excel/TradingView)."""
+    return daily.resample("M").last()
 
-# ───────── Strategy ────────────────────────────────────────────────
+nice = lambda xs: ", ".join(NAMES.get(x, x) for x in xs) if xs else "–"
+
+# ───────── Strategie ────────────────────────────────────────────────
 def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
-    # ---- Tagesdaten (für SMA) --------------------------------------
-    daily = _fetch_daily().ffill()        # fehlende Börsentage auffüllen
-    daily = daily.dropna(how="all")       # WE-Zeilen ohne Kurse entfernen
+    # ---- Tagesdaten für SMA ----------------------------------------
+    daily = _fetch_daily().ffill()
+    daily = daily.dropna(how="all")          # WE ohne Kurse löschen
     if daily.empty:
         return "GAA-Fehler", None, "Keine Kursdaten verfügbar."
 
-    # ---- Monats-Bars (für Momentum) --------------------------------
-    mon = _fetch_monthly()
+    # ---- Monats-Schlusskurse ---------------------------------------
+    mon = _monthly_close(daily)
     if mon.index[-1].month != pd.Timestamp.utcnow().month:
-        mon.loc[daily.index[-1]] = daily.iloc[-1]     # aktuellen Monat nachziehen
+        # Monatsbalken für laufenden Monat ergänzen
+        mon.loc[daily.index[-1]] = daily.iloc[-1]
 
-    mom = (
-        mon.pct_change(1).iloc[-1] +
-        mon.pct_change(3).iloc[-1] +
-        mon.pct_change(6).iloc[-1] +
-        mon.pct_change(9).iloc[-1]
-    ).dropna()
+    # ---- Momentum = Σ Prozent-Renditen -----------------------------
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "The default fill_method")
+        mom = (
+            (mon / mon.shift(1) - 1) +
+            (mon / mon.shift(3) - 1) +
+            (mon / mon.shift(6) - 1) +
+            (mon / mon.shift(9) - 1)
+        ).iloc[-1].dropna()
 
     price = daily.iloc[-1]
     sma   = daily.rolling(SMA_LEN).mean().iloc[-1]
 
-    # ---- Debug-Ausgabe --------------------------------------------
+    # ---- Debug -----------------------------------------------------
     dbg = pd.DataFrame({
-        "momentum%": (mom*100).round(2),
+        "momentum%": (mom * 100).round(2),
         "price": price,
         "SMA150": sma,
-        "diff%": ((price/sma - 1)*100).round(2)
+        "diff%": ((price / sma - 1) * 100).round(2),
+        "≥150d": daily.notna().sum() >= SMA_LEN,
+        "SMA_OK": price > sma,
     })
-    dbg["SMA_OK"] = price > sma
-    dbg["≥150d"]  = daily.notna().sum() >= SMA_LEN
-    print("\n=== DEBUG Price vs SMA150 ===")
+    print("\n=== DEBUG – Price vs SMA150 ===")
     print(dbg.to_string(float_format="%.2f"))
-    print("==============================================\n")
+    print("================================\n")
 
-    # ---- Eligibility-Filter ---------------------------------------
-    eligible = [
-        t for t in mom.index
-        if dbg.at[t, "≥150d"] and dbg.at[t, "SMA_OK"]
-    ]
+    # ---- Eligible & Top-N -----------------------------------------
+    eligible = dbg.index[(dbg["≥150d"]) & (dbg["SMA_OK"])]
+    top      = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
+    hold     = list(top.index) + ["CASH"] * (TOP_N - len(top))
 
-    top  = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
-    hold = list(top.index) + ["CASH"] * (TOP_N - len(top))
-
-    # ---- History-File ---------------------------------------------
+    # ---- History ---------------------------------------------------
     prev: List[str] = []
     if os.path.isfile(HIST_FILE) and os.path.getsize(HIST_FILE):
         prev = open(HIST_FILE).read().splitlines()[-1].split(";")[1].split(",")
@@ -107,19 +110,19 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
                 f.write("date;portfolio\n")
             f.write(f"{m_end:%F};{','.join(hold)}\n")
 
-    # ---- Discord-Text ---------------------------------------------
+    # ---- Discord-Nachricht ----------------------------------------
     m_end = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
-    text: List[str] = []
-    if buys:  text.append(f"Kaufen: {nice(buys)}")
-    if sells: text.append(f"Verkaufen: {nice(sells)}")
-    if holds: text.append(f"Halten: {nice(holds)}")
+    parts: List[str] = []
+    if buys:  parts.append(f"Kaufen: {nice(buys)}")
+    if sells: parts.append(f"Verkaufen: {nice(sells)}")
+    if holds: parts.append(f"Halten: {nice(holds)}")
     if not (buys or sells or holds):
-        text.append("Cash halten")
+        parts.append("Cash halten")
 
-    text.append(f"Aktuelles Portfolio: {nice(hold)}\n")
-    text.append("Momentum-Scores:")
+    parts.append(f"Aktuelles Portfolio: {nice(hold)}\n")
+    parts.append("Momentum-Scores:")
     for t, sc in top.items():
-        text.append(f"{NAMES.get(t,t)}: {sc:+.2%}")
+        parts.append(f"{NAMES.get(t,t)}: {sc:+.2%}")
 
     subject = f"GAA Rebalance ({m_end:%b %Y})"
-    return subject, "", "\n".join(text)
+    return subject, "", "\n".join(parts)
