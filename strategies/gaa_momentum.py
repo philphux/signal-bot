@@ -1,17 +1,20 @@
+# strategies/gaa_momentum.py
 """
-Global-Asset-Allocation – Momentum  (Top-3, Cash-Fallback)
+Global-Asset-Allocation – Momentum (Top-3, Cash-Fallback)
 """
+
 from __future__ import annotations
 import os, warnings
 from typing import List, Tuple
+
 import pandas as pd, yahooquery as yq, yfinance as yf
 
 # ───────── Parameter ────────────────────────────────────────────────
 TICKERS = ["BTC-USD", "QQQ", "GLD", "USO", "EEM", "FEZ", "IEF"]
 NAMES   = {
     "BTC-USD": "Bitcoin", "QQQ": "Nasdaq-100", "GLD": "Gold",
-    "USO": "WTI Crude Oil", "EEM": "Emerging Markets", "FEZ": "Euro Stoxx 50",
-    "IEF": "Treasury Bonds", "CASH": "Cash"
+    "USO": "WTI Crude Oil", "EEM": "Emerging Markets",
+    "FEZ": "Euro Stoxx 50", "IEF": "Treasury Bonds", "CASH": "Cash",
 }
 TOP_N, SMA_LEN = 3, 150
 HIST_FILE      = "gaa_history.csv"
@@ -26,39 +29,37 @@ def _to_dt(df: pd.DataFrame) -> pd.DataFrame:
 
 def _pivot_raw(raw: pd.DataFrame) -> pd.DataFrame:
     """
-    Wandelt das von yfinance zurückgelieferte Multi-Index-DataFrame
-    (egal ob Variante A oder B) in ein einfaches Adj-Close-DataFrame
-    mit Spalten = Ticker.
+    Extrahiert die Adj-Close-Spalte(n) **unabhängig** davon,
+    ob der Multi-Index als ('Adj Close','QQQ') oder ('QQQ','Adj Close')
+    aufgebaut ist.
     """
     if not isinstance(raw.columns, pd.MultiIndex):
-        # Single-Ticker-Download   -> einfacher Index
         col = "Adj Close" if "Adj Close" in raw else "Close"
         return raw[[col]].rename(columns={col: TICKERS[0]})
 
-    # Multi-Ticker: erst prüfen, ob Ebene-0 oder Ebene-1 das OHLCV-Label enthält
-    lvl0 = raw.columns.get_level_values(0)
-    lvl1 = raw.columns.get_level_values(1)
+    # falls Level-0 die Ticker enthält → Levels tauschen
+    if raw.columns.get_level_values(0)[0] in TICKERS:
+        raw = raw.swaplevel(0, 1, axis=1)
 
-    if "Adj Close" in lvl0:
+    fields = raw.columns.get_level_values(0)
+    if "Adj Close" in fields:
         df = raw.xs("Adj Close", level=0, axis=1)
-    elif "Adj Close" in lvl1:
-        df = raw.xs("Adj Close", level=1, axis=1)
-    elif "Close" in lvl0:
+    else:
         df = raw.xs("Close", level=0, axis=1)
-    else:                                   # Fallback
-        df = raw.xs("Close", level=1, axis=1)
 
+    df.columns.name = None
     return df
 
 def _fetch_daily() -> pd.DataFrame:
-    """2 Jahre Tages-Adj-Close (yahooquery ➜ yfinance Fallback)."""
+    """2 Jahre Tages-Adj-Close – yahooquery → yfinance Fallback."""
     # ---------- 1) yahooquery ----------
     try:
         tq  = yq.Ticker(" ".join(TICKERS))
         raw = tq.history(period="2y", interval="1d", adj_ohlc=True)
         if isinstance(raw.index, pd.MultiIndex):
             df = (raw.reset_index()
-                    .pivot(index="date", columns="symbol", values="adjclose"))
+                    .pivot(index="date", columns="symbol",
+                           values="adjclose"))
         else:
             df = raw["adjclose"]
         if not df.isna().all().all():
@@ -69,20 +70,18 @@ def _fetch_daily() -> pd.DataFrame:
     # ---------- 2) yfinance ----------
     raw = yf.download(
         tickers=" ".join(TICKERS),
-        period="2y",
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-        threads=False,
+        period="2y", interval="1d",
+        auto_adjust=False, threads=False, progress=False
     )
     return _to_dt(_pivot_raw(raw))
 
 def _monthly_close(daily: pd.DataFrame) -> pd.DataFrame:
-    """Letzter Handelstag pro Monat (Excel-/TradingView-kompatibel)."""
+    """Letzter Handelstag je Monat (Excel-kompatibel)."""
     return daily.resample("M").last()
 
 # ───────── Strategie ────────────────────────────────────────────────
 def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
+    # Tagesdaten & SMA ------------------------------------------------
     daily = _fetch_daily().ffill()
     if daily.empty:
         return "GAA-Fehler", None, "Keine Kursdaten verfügbar."
@@ -91,6 +90,7 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     if mon.index[-1].month != pd.Timestamp.utcnow().month:
         mon.loc[daily.index[-1]] = daily.iloc[-1]
 
+    # Momentum-Score --------------------------------------------------
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "The default fill_method")
         mom = (
@@ -100,14 +100,12 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
             (mon / mon.shift(9) - 1)
         ).iloc[-1].dropna()
 
-    price = daily.iloc[-1]
-    sma   = daily.rolling(SMA_LEN).mean().iloc[-1]
-
+    price = daily.iloc[-1];  sma = daily.rolling(SMA_LEN).mean().iloc[-1]
     eligible = mom.index[(price > sma) & price.notna() & sma.notna()]
     top      = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
     hold     = list(top.index) + ["CASH"] * (TOP_N - len(top))
 
-    # ---------- History --------------------------------------------
+    # History ---------------------------------------------------------
     prev: List[str] = []
     if os.path.isfile(HIST_FILE) and os.path.getsize(HIST_FILE):
         prev = open(HIST_FILE).read().splitlines()[-1].split(";")[1].split(",")
@@ -123,7 +121,7 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
                 f.write("date;portfolio\n")
             f.write(f"{m_end:%F};{','.join(hold)}\n")
 
-    # ---------- Discord-Text ---------------------------------------
+    # Discord-Text ----------------------------------------------------
     m_end = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
     parts: List[str] = []
     if buys:  parts.append(f"Kaufen: {nice(buys)}")
