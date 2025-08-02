@@ -25,10 +25,12 @@ def _to_dt(df: pd.DataFrame) -> pd.DataFrame:
     df.index = idx[idx.notna()].tz_convert(None)
     return df.sort_index()
 
-def _pivot_raw(raw: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(raw.columns, pd.MultiIndex):
-        col = "Adj Close" if "Adj Close" in raw else "Close"
-        return raw[[col]].rename(columns={col:TICKERS[0]})
+def _pivot_raw(raw):
+    if isinstance(raw.columns, pd.MultiIndex):
+        if raw.columns.get_level_values(0)[0] in TICKERS:
+            raw = raw.swaplevel(0,1,axis=1)
+        return raw.xs("Close", level=0, axis=1)
+    return raw[["Close"]].rename(columns={"Close": TICKERS[0]})
     if raw.columns.get_level_values(0)[0] in TICKERS:
         raw = raw.swaplevel(0,1,axis=1)
     adj = raw.xs("Adj Close",level=0,axis=1)
@@ -55,11 +57,8 @@ def _fetch_daily() -> pd.DataFrame:
                     auto_adjust=False,progress=False,threads=False)
     return _to_dt(_pivot_raw(raw))
 
-def _monthly_close(d: pd.DataFrame)->pd.DataFrame:
-    filled=d.ffill(limit=3)
-    mon=filled.resample("M").apply(lambda x:x.iloc[-1])
-    today=pd.Timestamp.utcnow().tz_convert(None).normalize()
-    return mon[mon.index<=today]
+def _monthly_close(d):
+    return d.resample("ME").last()
 
 # ───────── Strategie ──────────────────────────────────────────────
 def gaa_monthly_momentum()->Tuple[str|None,str|None,str|None]:
@@ -117,3 +116,4 @@ def gaa_monthly_momentum()->Tuple[str|None,str|None,str|None]:
         txt.append("\nNicht berücksichtigt (SMA oder NaN): "+nice(missed[:5]))
 
     return f"GAA Rebalance ({stamp:%b %Y})","","\n".join(txt)
+
