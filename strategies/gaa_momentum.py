@@ -1,6 +1,12 @@
-# strategies/gaa_momentum.py  (DEBUG-Version)
+# strategies/gaa_momentum.py
 """
 Global-Asset-Allocation – Monthly Momentum (Top-3 + Cash, Debug)
+----------------------------------------------------------------
+• Universum : BTC-USD, QQQ, GLD, USO, EEM, FEZ, IEF
+• Momentum  : Σ %-Rendite (1 M + 3 M + 6 M + 9 M)
+• Filter    : Schlusskurs > SMA150
+• Rebalance : Monatsultimo (realer letzter Handelstag)
+• Logfile   : gaa_history.csv
 """
 
 from __future__ import annotations
@@ -11,9 +17,9 @@ import yahooquery as yq
 import yfinance   as yf
 
 
-# ─────────── Parameter ─────────────────────────────────────────────
-TICKERS = ["BTC-USD", "QQQ", "GLD", "USO", "EEM", "FEZ", "IEF"]
-NAMES   = {
+# ────────────────────────── Parameter ───────────────────────────────
+TICKERS        = ["BTC-USD", "QQQ", "GLD", "USO", "EEM", "FEZ", "IEF"]
+NAMES          = {
     "BTC-USD": "Bitcoin",       "QQQ": "Nasdaq-100",
     "GLD": "Gold",              "USO": "WTI Crude Oil",
     "EEM": "Emerging Markets",  "FEZ": "Euro Stoxx 50",
@@ -23,12 +29,10 @@ TOP_N, SMA_LEN = 3, 150
 SHOW_TOP_MOM   = 5
 HIST_FILE      = "gaa_history.csv"
 nice = lambda xs: ", ".join(NAMES.get(x, x) for x in xs) if xs else "–"
-
-# Jede Debug-Zeile direkt ins GitHub-Log
-def dbg(*a, **k): print(*a, **k, file=sys.stdout, flush=True)
+dbg  = lambda *a, **k: print(*a, **k, file=sys.stdout, flush=True)
 
 
-# ─────────── Helper ────────────────────────────────────────────────
+# ────────────────────────── Helper ──────────────────────────────────
 def _to_dt(df: pd.DataFrame) -> pd.DataFrame:
     idx = pd.to_datetime(df.index, utc=True, errors="coerce")
     df  = df[idx.notna()].copy()
@@ -37,6 +41,7 @@ def _to_dt(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _pivot_raw(raw: pd.DataFrame) -> pd.DataFrame:
+    """Adj Close bevorzugt, Lücken mit Close gefüllt."""
     if not isinstance(raw.columns, pd.MultiIndex):
         col = "Adj Close" if "Adj Close" in raw else "Close"
         return raw[[col]].rename(columns={col: TICKERS[0]})
@@ -46,12 +51,13 @@ def _pivot_raw(raw: pd.DataFrame) -> pd.DataFrame:
 
     adj  = raw.xs("Adj Close", level=0, axis=1)
     cls  = raw.xs("Close",     level=0, axis=1)
-    fill = adj.where(~adj.isna(), cls)
-    fill.columns.name = None
-    return fill
+    filled = adj.where(~adj.isna(), cls)
+    filled.columns.name = None
+    return filled
 
 
 def _fetch_daily() -> pd.DataFrame:
+    """2 Jahre Tagesdaten – yahooquery → yfinance-Fallback"""
     try:
         tq  = yq.Ticker(" ".join(TICKERS))
         raw = tq.history(period="2y", interval="1d", adj_ohlc=True)
@@ -73,17 +79,24 @@ def _fetch_daily() -> pd.DataFrame:
 
 
 def _monthly_close(d: pd.DataFrame) -> pd.DataFrame:
-    # max. drei fehlende Handelstage nach vorne füllen
-    return d.ffill(limit=3).resample("M").apply(lambda x: x.iloc[-1])
+    """
+    Monats-Close = letzter vorhandener Handelstag; fehlende Tage (max 3)
+    werden per ffill aufgefüllt, damit jeder Monat einen Wert besitzt.
+    """
+    filled = d.ffill(limit=3)
+    mon    = filled.resample("M").apply(lambda x: x.iloc[-1])
+    # nur Monate bis heute behalten (31. Aug wird nicht vorab genommen)
+    mon    = mon[mon.index <= pd.Timestamp.utcnow(normalize=True)]
+    return mon
 
 
-# ─────────── Strategie ─────────────────────────────────────────────
+# ────────────────────────── Strategie ───────────────────────────────
 def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     daily = _fetch_daily()
     if daily.empty:
         return "GAA-Fehler", None, "Keine Kursdaten verfügbar."
 
-    mon  = _monthly_close(daily)
+    mon = _monthly_close(daily)
     dbg("\n=== Monats-Schluss (letzte Zeile) ===")
     dbg(mon.tail(1).T)
 
@@ -95,9 +108,8 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
                (mon / mon.shift(9) - 1)).iloc[-1]
 
     price = daily.iloc[-1]
-    sma   = daily.rolling(SMA_LEN).mean().iloc[-1]
+    sma   = daily.rolling(SMA_LEN, min_periods=1).mean().iloc[-1]
 
-    # Debug-Tabelle
     debug_tbl = pd.DataFrame({
         "price": price,
         "SMA150": sma,
@@ -110,10 +122,10 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
 
     eligible = mom.index[(price > sma) & mom.notna()]
 
-    top = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
+    top  = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
     hold = list(top.index) + ["CASH"] * (TOP_N - len(top))
 
-    # ─── History - Leser / Schreiber ──────────────────────────────
+    # ─── History‐Handling ──────────────────────────────────────────
     prev: List[str] = []
     if os.path.isfile(HIST_FILE) and os.path.getsize(HIST_FILE):
         prev = open(HIST_FILE).read().splitlines()[-1].split(";")[1].split(",")
@@ -129,7 +141,7 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
                 f.write("date;portfolio\n")
             f.write(f"{m_end:%F};{','.join(hold)}\n")
 
-    # ─── Discord-Text ────────────────────────────────────────────
+    # ─── Discord-Text ─────────────────────────────────────────────
     m_end = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
     txt: List[str] = []
     if buys:  txt.append(f"Kaufen: {nice(buys)}")
@@ -144,7 +156,6 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
         mark = "  ⬅︎ SMA ok" if t in eligible else ""
         txt.append(f"{NAMES.get(t,t)}: {sc:+.2%}{mark}")
 
-    # warum nicht gekauft?
     missed = [t for t in mom.sort_values(ascending=False).head(10).index
               if t not in eligible]
     if missed:
