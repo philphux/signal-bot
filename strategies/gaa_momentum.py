@@ -1,55 +1,50 @@
-# strategies/gaa_momentum.py  (komplette, lauffähige Datei)
+# strategies/gaa_momentum.py
 """
 Global-Asset-Allocation – Monthly Momentum (Top-3 + Cash, Debug)
-
-• Universum : BTC-USD, QQQ, GLD, USO, EEM, FEZ, IEF
-• Momentum  : Σ %-Renditen (1 M + 3 M + 6 M + 9 M)
-• Filter    : Schlusskurs > SMA150
-• Rebalance : Monatsultimo (letzter realer Handelstag)
-• Logfile   : gaa_history.csv
+----------------------------------------------------------------
+* Universum  : BTC-USD, QQQ, GLD, USO, EEM, FEZ, IEF
+* Momentum   : Σ %-Rendite (1 M + 3 M + 6 M + 9 M)
+* Filter     : Schlusskurs > SMA150
+* Rebalance  : Monatsultimo (letzter **real**er Handelstag)
+* History    : gaa_history.csv
 """
 
 from __future__ import annotations
 import os, sys, warnings
 from typing import List, Tuple
-
 import pandas as pd
 import yahooquery as yq
-import yfinance as yf
+import yfinance   as yf
 
-
-# ─────────────────────────── Parameter ──────────────────────────────
+# ────────── Parameter ──────────────────────────────────────────────
 TICKERS        = ["BTC-USD", "QQQ", "GLD", "USO", "EEM", "FEZ", "IEF"]
 NAMES          = {
     "BTC-USD": "Bitcoin",       "QQQ": "Nasdaq-100",
     "GLD": "Gold",              "USO": "WTI Crude Oil",
     "EEM": "Emerging Markets",  "FEZ": "Euro Stoxx 50",
-    "IEF": "Treasury Bonds",    "CASH": "Cash",
+    "IEF": "Treasury Bonds",    "CASH": "Cash"
 }
 TOP_N, SMA_LEN = 3, 150
 SHOW_TOP_MOM   = 5
 HIST_FILE      = "gaa_history.csv"
-
 nice = lambda xs: ", ".join(NAMES.get(x, x) for x in xs) if xs else "–"
 dbg  = lambda *a, **k: print(*a, **k, file=sys.stdout, flush=True)
 
-
-# ─────────────────────────── Helper ─────────────────────────────────
+# ────────── Helper ─────────────────────────────────────────────────
 def _to_dt(df: pd.DataFrame) -> pd.DataFrame:
     idx = pd.to_datetime(df.index, utc=True, errors="coerce")
     df  = df[idx.notna()].copy()
-    df.index = idx[idx.notna()].tz_convert(None)
+    df.index = idx[idx.notna()].tz_convert(None)        # tz-naiv
     return df.sort_index()
 
-
 def _pivot_raw(raw: pd.DataFrame) -> pd.DataFrame:
-    """Adj Close bevorzugt; Lücken mit Close gefüllt (für yfinance-Fallback)."""
+    """Adj-Close bevorzugt; Lücken mit Close gefüllt (yfinance-Fallback)."""
     if not isinstance(raw.columns, pd.MultiIndex):
         col = "Adj Close" if "Adj Close" in raw else "Close"
         return raw[[col]].rename(columns={col: TICKERS[0]})
 
-    if raw.columns.get_level_values(0)[0] in TICKERS:
-        raw = raw.swaplevel(0, 1, axis=1)        # (Ticker, Field) → (Field, Ticker)
+    if raw.columns.get_level_values(0)[0] in TICKERS:   # (Ticker, Field) → …
+        raw = raw.swaplevel(0, 1, axis=1)
 
     adj  = raw.xs("Adj Close", level=0, axis=1)
     cls  = raw.xs("Close",     level=0, axis=1)
@@ -57,16 +52,15 @@ def _pivot_raw(raw: pd.DataFrame) -> pd.DataFrame:
     filled.columns.name = None
     return filled
 
-
 def _fetch_daily() -> pd.DataFrame:
-    """Tages-Schlusskurse 2 Jahre – erst yahooquery, dann yfinance-Fallback"""
+    """2 y Tagesdaten – yahooquery ⇒ yfinance-Fallback."""
     try:
         tq  = yq.Ticker(" ".join(TICKERS))
         raw = tq.history(period="2y", interval="1d", adj_ohlc=True)
         if isinstance(raw.index, pd.MultiIndex):
             df = (raw.reset_index()
                     .pivot(index="date", columns="symbol", values="adjclose"))
-        else:                          # 1 Ticker
+        else:
             df = raw["adjclose"]
         if not df.isna().all().all():
             dbg("== yahooquery-Daten genutzt ==")
@@ -79,20 +73,17 @@ def _fetch_daily() -> pd.DataFrame:
                       auto_adjust=False, progress=False, threads=False)
     return _to_dt(_pivot_raw(raw))
 
-
-def _monthly_close(daily: pd.DataFrame) -> pd.DataFrame:
+def _monthly_close(d: pd.DataFrame) -> pd.DataFrame:
     """
-    Monats-Close = letzter realer Handelstag pro Monat (max 3 Tage ffill).
-    Verwirft zukünftige Kalender-Ultimos.
+    Monats-Close = letzter realer Handelstag; max 3 fehlende Tage vorwärts füllen.
+    Verwirft zukünftige Monatsenden (tz-naiver Vergleich!).
     """
-    filled = daily.ffill(limit=3)
+    filled = d.ffill(limit=3)
     mon    = filled.resample("M").apply(lambda x: x.iloc[-1])
-    today  = pd.Timestamp.utcnow().normalize()     # <-- KEIN `normalize=` Param!
-    mon    = mon[mon.index <= today]
-    return mon
+    today  = pd.Timestamp.utcnow().tz_convert(None).normalize()  # tz-naiv!
+    return mon[mon.index <= today]
 
-
-# ─────────────────────────── Strategie ──────────────────────────────
+# ────────── Strategie ──────────────────────────────────────────────
 def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     daily = _fetch_daily()
     if daily.empty:
@@ -123,11 +114,10 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     dbg(debug_tbl)
 
     eligible = mom.index[(price > sma) & mom.notna()]
+    top      = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
+    hold     = list(top.index) + ["CASH"]*(TOP_N-len(top))
 
-    top   = mom.loc[eligible].sort_values(ascending=False).head(TOP_N)
-    hold  = list(top.index) + ["CASH"] * (TOP_N - len(top))
-
-    # ─── History ──────────────────────────────────────────────────
+    # ─── History ───────────────────────────────────────────────────
     prev: List[str] = []
     if os.path.isfile(HIST_FILE) and os.path.getsize(HIST_FILE):
         prev = open(HIST_FILE).read().splitlines()[-1].split(";")[1].split(",")
@@ -137,14 +127,14 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     holds = sorted(set(hold) & set(prev))
 
     if buys or sells or not prev:
-        m_end = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
+        stamp = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
         with open(HIST_FILE, "a") as f:
             if os.path.getsize(HIST_FILE) == 0:
                 f.write("date;portfolio\n")
-            f.write(f"{m_end:%F};{','.join(hold)}\n")
+            f.write(f"{stamp:%F};{','.join(hold)}\n")
 
-    # ─── Discord-Text ────────────────────────────────────────────
-    m_end = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
+    # ─── Discord-Text ─────────────────────────────────────────────
+    stamp = pd.Timestamp.utcnow().to_period("M").to_timestamp("M")
     txt: List[str] = []
     if buys:  txt.append(f"Kaufen: {nice(buys)}")
     if sells: txt.append(f"Verkaufen: {nice(sells)}")
@@ -163,4 +153,4 @@ def gaa_monthly_momentum() -> Tuple[str | None, str | None, str | None]:
     if missed:
         txt.append("\nNicht berücksichtigt (SMA oder NaN): " + nice(missed[:5]))
 
-    return f"GAA Rebalance ({m_end:%b %Y})", "", "\n".join(txt)
+    return f"GAA Rebalance ({stamp:%b %Y})", "", "\n".join(txt)
