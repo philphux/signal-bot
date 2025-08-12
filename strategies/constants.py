@@ -10,8 +10,8 @@ TRY_COUNT = 3
 DAILY_NOTIFICATION = True # Write True to send a daily notification, False to only send notifications when the signal changes
 
 # main subjects
-MAIN_SIGNAL_CHANGE_LONG = f"GO LONG NOW (cooldown activated for {0} days)"
-MAIN_SIGNAL_CHANGE_SHORT = f"GO IN CASH NOW (cooldown activated for {0} days)"
+MAIN_SIGNAL_CHANGE_LONG = "GO LONG NOW (cooldown activated for {0} days)"
+MAIN_SIGNAL_CHANGE_SHORT = "GO IN CASH NOW (cooldown activated for {0} days)"
 COOLDOWN_WARNINGS = [1]
 COOLDOWN_WARNINGS_TEXT = ["Cooldown warning: Last day of cooldown"]
 
