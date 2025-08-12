@@ -36,14 +36,16 @@ def spy_tips_cool():
 
     # -------- History lesen ------------------------------------
     last_sig = last_diff = None
-    if os.path.exists(HIST_FILE) and os.path.getsize(HIST_FILE):
-        last_line  = open(HIST_FILE).read().strip().splitlines()[-1]
+    file_exists = os.path.exists(HIST_FILE)
+    if file_exists and os.path.getsize(HIST_FILE):
+        with open(HIST_FILE) as fh:
+            last_line = fh.read().strip().splitlines()[-1]
         last_date, last_sig, last_diff, *_ = last_line.split(",")
         last_diff = float(last_diff)
 
     # -------- History schreiben (einmal pro Tag) ----------------
     if (last_sig is None) or (last_date != today.isoformat()):
-        first_line = not os.path.exists(HIST_FILE)
+        first_line = (not file_exists) or os.path.getsize(HIST_FILE) == 0
         with open(HIST_FILE, "a") as f:
             if first_line:
                 f.write("date,signal,diff_pct,spy_mom,tips_mom\n")
