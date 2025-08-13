@@ -2,6 +2,7 @@
 # ULT-GTAA — SMA150, Equal Weight Top-3, Monthly
 # Leverage-Gate: 3x if (price > 10M-SMA) & (20d vol < 30%)
 # Startdatum bewusst kurz (2024-01-01) für schnellen Download
+
 from __future__ import annotations
 
 import os
@@ -16,7 +17,7 @@ TOP_N           = 3
 SMA_DAYS        = 150
 VOL_THR         = 0.30                      # 30% annualisiert
 TENM_SMA_DAYS   = 210                       # ~10 Monate à 21 Handelstage
-CSV_DIR         = "signals"                 # CSV-Export-Ordner (nur am Monatsultimo)
+CSV_PATH        = "ult_gtaa_history.csv"    # CSV im Repo-Root
 
 # ---------- Helpers ----------
 def _tz_naive(df: pd.DataFrame) -> pd.DataFrame:
@@ -110,7 +111,7 @@ def delta_official_vs_preview(sel_official: list[str], sel_preview: list[str]):
 def generate_message(save_csv: bool = True) -> str:
     """
     Erzeugt den kompakten Text-Output für Discord und speichert (falls Ultimo)
-    die offiziellen Signale als CSV unter ./signals/.
+    die offiziellen Signale als CSV im Repo-Root: ./ult_gtaa_history.csv
     """
     prices_d = download_close(TICKERS, START)
     if prices_d.empty:
@@ -144,12 +145,13 @@ def generate_message(save_csv: bool = True) -> str:
 
     added, removed, kept = delta_official_vs_preview(sel_off, sel_prev)
 
-    # ---------- CSV-Speicherung nur am letzten HANDELSTAG des aktuellen Monats ----------
-    # robust gegen Wochenende/Feiertage: prüfe anhand der tatsächlich geladenen Preise
+    # ---------- CSV-Speicherung NUR am offiziellen Rebalancing-Tag ----------
+    # Definition: letzter HANDELSTAG des aktuellen Monats (robust gegen Wochenende/Feiertage),
+    # und dieser Handelstag entspricht dem ME-Label der Preisdaten.
     if save_csv:
         today = pd.Timestamp.utcnow().normalize()
 
-        # letzter beobachteter Handelstag im aktuellen Monatslabel (bis jetzt)
+        # letzter beobachteter Handelstag innerhalb des aktuellen Monats
         try:
             last_trading_day_this_month = prices_d.loc[
                 prices_d.index.to_period("M") == today.to_period("M")
@@ -157,29 +159,38 @@ def generate_message(save_csv: bool = True) -> str:
         except ValueError:
             last_trading_day_this_month = None
 
-        # Monatsend-Label laut Kalender
+        # Monatsend-Label laut Kalender und laut beobachteten Daten
         this_me_label = today.to_period("M").to_timestamp("M")
-
-        # Liste der beobachteten Monatsend-Handelstage (aus Daten)
         month_ends_obs = prices_d.resample("ME").last().index
 
         is_last_trading_day = (
             last_trading_day_this_month is not None
             and last_trading_day_this_month.normalize() == today
-            and (this_me_label in month_ends_obs)             # es gibt für diesen Monat ein ME-Label
-            and (last_trading_day_this_month.normalize() == this_me_label)  # heute = ME-Handelstag
+            and (this_me_label in month_ends_obs)
+            and (last_trading_day_this_month.normalize() == this_me_label)
         )
 
-        if is_last_trading_day and w_off:
-            os.makedirs(CSV_DIR, exist_ok=True)
-            df_out = pd.DataFrame({
-                "As-of":   [ref_off.strftime("%Y-%m-%d")] * len(w_off),
-                "Ticker":  list(w_off.keys()),
-                "Weight":  list(w_off.values()),
-                "Leverage": [lev_off] * len(w_off)
-            })
-            fname = os.path.join(CSV_DIR, f"ult_gtaa_{today.date()}.csv")
-            df_out.to_csv(fname, index=False)
+        if is_last_trading_day:
+            # Zeile vorbereiten (immer drei Slots; ggf. mit Leerwerten auffüllen)
+            tickers = list(w_off.keys())
+            n = len(tickers)
+            weight_num = round(1.0 / n, 4) if n > 0 else 0.0  # in Dezimal (z. B. 0.3333)
+            row = {
+                "date": ref_off.strftime("%Y-%m-%d"),
+                "ticker1": tickers[0] if n > 0 else "",
+                "weight1": weight_num if n > 0 else 0.0,
+                "ticker2": tickers[1] if n > 1 else "",
+                "weight2": weight_num if n > 1 else 0.0,
+                "ticker3": tickers[2] if n > 2 else "",
+                "weight3": weight_num if n > 2 else 0.0,
+                "leverage": lev_off,
+            }
+            df_entry = pd.DataFrame([row])
+
+            if os.path.exists(CSV_PATH):
+                df_entry.to_csv(CSV_PATH, mode="a", header=False, index=False)
+            else:
+                df_entry.to_csv(CSV_PATH, index=False)
 
     # ---------- Kompakter Text-Output ----------
     lines = []
