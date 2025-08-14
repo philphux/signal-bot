@@ -2,7 +2,7 @@ name: ULT-GTAA Signal Bot
 
 on:
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "5 20 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -40,3 +40,4 @@ jobs:
             git commit -m "Add ULT-GTAA CSV signal for $(date -u +'%Y-%m-%d')" || echo "No CSV changes to commit"
             git push
           fi
+
